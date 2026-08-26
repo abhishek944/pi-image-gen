@@ -1,7 +1,5 @@
 # pi-image-gen
 
-![pi-image-gen preview](https://raw.githubusercontent.com/abhishek944/pi-image-gen/main/preview.png)
-
 Pi extension that adds an `image_generate` tool. Supported providers:
 
 | Provider                       | Model id (alias)                              | Authentication        |
