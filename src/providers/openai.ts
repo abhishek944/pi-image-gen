@@ -1,0 +1,202 @@
+import {
+  describeNetworkError,
+  ImageGenError,
+  missingKeyError,
+  providerLogLabel,
+  readBodyText,
+  redactUrl,
+  throwHttpError,
+} from '../errors.js';
+import {
+  classifyImageOutput,
+  MAX_BASE64_IMAGE_CHARS,
+  MAX_GENERATED_IMAGES,
+  sniffMime,
+} from '../image-input.js';
+import type {
+  GenerateImageParams,
+  ImageProviderAdapter,
+  RawImageResult,
+  ResolvedImageInput,
+  ResolvedProvider,
+} from '../types.js';
+import { withDefaultPath } from '../url.js';
+
+export function bearerHeaders(provider: ResolvedProvider): Record<string, string> {
+  const headers: Record<string, string> = {};
+  if (provider.apiKey) headers.authorization = `Bearer ${provider.apiKey}`;
+  if (provider.headers) Object.assign(headers, provider.headers);
+  return headers;
+}
+
+/**
+ * OpenAI-compatible image API. Used for OpenAI directly and any
+ * customProvider with `api: 'openai'`.
+ *
+ * Two endpoints:
+ *   - POST /v1/images/generations  (text-to-image, JSON body)
+ *   - POST /v1/images/edits        (image-to-image, multipart/form-data)
+ *
+ * The edit path is selected when the caller passes `inputs` (resolved
+ * reference images). Mask is intentionally not exposed to keep scope small.
+ *
+ * OpenRouter is NOT OpenAI-compatible for images — it uses POST /api/v1/images
+ * (no `/generations` suffix). See providers/openrouter.ts.
+ */
+export const openaiAdapter: ImageProviderAdapter = {
+  async generate(
+    provider: ResolvedProvider,
+    remoteModelId: string,
+    params: GenerateImageParams,
+    fetchImpl: typeof fetch,
+    signal?: AbortSignal,
+    inputs?: ResolvedImageInput[],
+  ): Promise<RawImageResult[]> {
+    if (!provider.apiKey) {
+      throw missingKeyError(provider);
+    }
+    const base = withDefaultPath(provider.baseUrl, '/v1');
+    if (inputs && inputs.length > 0) {
+      return generateWithImages(provider, base, remoteModelId, params, inputs, fetchImpl, signal);
+    }
+    return generateFromText(provider, base, remoteModelId, params, fetchImpl, signal);
+  },
+};
+
+async function generateFromText(
+  provider: ResolvedProvider,
+  base: string,
+  remoteModelId: string,
+  params: { prompt: string; n?: number; size?: string; quality?: string },
+  fetchImpl: typeof fetch,
+  signal?: AbortSignal,
+): Promise<RawImageResult[]> {
+  const url = `${base}/images/generations`;
+  const body: Record<string, unknown> = {
+    model: remoteModelId,
+    prompt: params.prompt,
+    n: params.n ?? 1,
+  };
+  if (params.size) body.size = params.size;
+  if (params.quality) body.quality = params.quality;
+
+  let res: Response;
+  try {
+    res = await fetchImpl(url, {
+      method: 'POST',
+      headers: { ...bearerHeaders(provider), 'content-type': 'application/json' },
+      body: JSON.stringify(body),
+      signal: signal ?? null,
+    });
+  } catch (error) {
+    throw describeNetworkError(error, provider);
+  }
+  return parseImagesResponse(res, url, provider);
+}
+
+async function generateWithImages(
+  provider: ResolvedProvider,
+  base: string,
+  remoteModelId: string,
+  params: { prompt: string; n?: number; size?: string; quality?: string },
+  inputs: ResolvedImageInput[],
+  fetchImpl: typeof fetch,
+  signal?: AbortSignal,
+): Promise<RawImageResult[]> {
+  const url = `${base}/images/edits`;
+  const form = new FormData();
+  form.append('model', remoteModelId);
+  form.append('prompt', params.prompt);
+  form.append('n', String(params.n ?? 1));
+  if (params.size) form.append('size', params.size);
+  if (params.quality) form.append('quality', params.quality);
+  // OpenAI accepts repeated `image[]` for multi-image edits on gpt-image-2.
+  const fieldName = inputs.length > 1 ? 'image[]' : 'image';
+  for (const [i, input] of inputs.entries()) {
+    const ext = input.mimeType.split('/')[1] ?? 'png';
+    const blob = new Blob([new Uint8Array(input.bytes)], { type: input.mimeType });
+    form.append(fieldName, blob, `image-${i}.${ext}`);
+  }
+
+  let res: Response;
+  try {
+    res = await fetchImpl(url, {
+      method: 'POST',
+      headers: bearerHeaders(provider),
+      body: form,
+      signal: signal ?? null,
+    });
+  } catch (error) {
+    throw describeNetworkError(error, provider);
+  }
+  return parseImagesResponse(res, url, provider);
+}
+
+export async function parseImagesResponse(
+  res: Response,
+  url: string,
+  provider: ResolvedProvider,
+): Promise<RawImageResult[]> {
+  // Check status BEFORE reading the body: an HTTP error is classified by status
+  // (body-free), and a body that breaks mid-read is classified as a network
+  // failure rather than swallowed and misreported as "invalid JSON".
+  if (!res.ok) {
+    await throwHttpError(res, provider);
+  }
+  const text = await readBodyText(res, provider);
+  const contentType = res.headers.get('content-type') ?? '';
+  if (!contentType.includes('json')) {
+    // The raw body may carry credentials / another tenant's data — never
+    // interpolate it; `redactUrl(url)` drops any signed query on the endpoint.
+    const detail = `${provider.name} returned ${contentType || 'non-JSON'} from ${redactUrl(url)}. The endpoint probably doesn't expose the OpenAI-compatible images API at this path.`;
+    throw new ImageGenError(detail, `${providerLogLabel(provider)} returned non-JSON`);
+  }
+  let json: {
+    data?: Array<{ url?: string; b64_json?: string; revised_prompt?: string; media_type?: string }>;
+  };
+  try {
+    json = JSON.parse(text);
+  } catch {
+    // The parse error message echoes response bytes, so it's dropped entirely.
+    const detail = `${provider.name} returned invalid JSON.`;
+    throw new ImageGenError(detail, `${providerLogLabel(provider)} returned invalid JSON`);
+  }
+  const data = json.data ?? [];
+  if (data.length > MAX_GENERATED_IMAGES) {
+    throw new ImageGenError(
+      `Provider returned too many images (maximum ${MAX_GENERATED_IMAGES}).`,
+      `${providerLogLabel(provider)} returned too many images`,
+    );
+  }
+  const out: RawImageResult[] = [];
+  for (const entry of data) {
+    // Prefer explicit b64_json field (OpenAI shape). If absent, classify the
+    // `url` field — some gateways return a `data:` URI or even raw base64
+    // there instead of a real URL.
+    let payload: RawImageResult['data'] | null = null;
+    if (entry.b64_json) {
+      if (entry.b64_json.length > MAX_BASE64_IMAGE_CHARS) {
+        throw new ImageGenError(
+          'Provider returned an image that exceeds the size ceiling.',
+          `${providerLogLabel(provider)} returned an oversized image`,
+        );
+      }
+      const prefix = Buffer.from(entry.b64_json.slice(0, 24), 'base64');
+      const mimeType = sniffMime(prefix) ?? entry.media_type ?? 'image/png';
+      payload = { kind: 'base64', bytes: entry.b64_json, mimeType };
+    } else {
+      const classified = classifyImageOutput(entry.url);
+      if (classified) payload = classified;
+    }
+    if (!payload) continue;
+    const item: RawImageResult = { data: payload };
+    if (entry.revised_prompt) item.revisedPrompt = entry.revised_prompt;
+    out.push(item);
+  }
+  if (out.length === 0) {
+    // Entry count is safe metadata; the raw body ("Raw: …") is not — drop it.
+    const detail = `${provider.name} returned no usable images. Response had ${data.length} entries but none had b64_json or a valid url.`;
+    throw new ImageGenError(detail, `${providerLogLabel(provider)} returned no usable images`);
+  }
+  return out;
+}

@@ -1,0 +1,62 @@
+{
+  "skill_name": "image-gen",
+  "evals": [
+    {
+      "id": "distinct-assets-vs-variants",
+      "prompt": "I need three different deliverables: a rainforest website hero, a white-background product shot, and a profile avatar. I was thinking of making one image request with n=3. Explain the exact tool-call strategy you would use, but do not call any tools.",
+      "expected_output": "Use one image_generate call per distinct asset and explain that n creates variants of one prompt.",
+      "expectations": [
+        {
+          "text": "Uses the image generation tool",
+          "includes": ["image_generate"]
+        },
+        {
+          "text": "Makes separate calls for distinct assets",
+          "includes_any": ["three separate", "3 separate", "one call per asset", "separate call for each"]
+        },
+        {
+          "text": "Explains that n represents variants",
+          "includes": ["variants"]
+        }
+      ]
+    },
+    {
+      "id": "edit-target-and-style-reference",
+      "prompt": "I have two files: portrait.png is the photo I want edited, and lighting.jpg is only a lighting/style reference. Replace the portrait background with a rainy night street while keeping the person's face, pose, and clothing unchanged. Describe the image inputs and prompt you would send, but do not call any tools.",
+      "expected_output": "Label portrait.png as the edit target and lighting.jpg as a style reference, with explicit preservation constraints.",
+      "expectations": [
+        {
+          "text": "Labels the portrait as the edit target",
+          "includes": ["portrait.png", "edit target"]
+        },
+        {
+          "text": "Labels the lighting image as a style reference",
+          "includes": ["lighting.jpg", "style reference"]
+        },
+        {
+          "text": "Preserves the requested invariants",
+          "includes": ["face", "pose", "clothing"]
+        }
+      ]
+    },
+    {
+      "id": "repo-native-svg-boundary",
+      "prompt": "A TypeScript web app already has a monochrome SVG icon set. I need one more 16px settings icon that inherits currentColor and matches the existing stroke style. Should this use raster image generation? Give the implementation direction, but do not edit files or call tools.",
+      "expected_output": "Keep the asset repo-native and extend the SVG icon set instead of using image_generate.",
+      "expectations": [
+        {
+          "text": "Keeps the icon as SVG or vector source",
+          "includes_any": ["existing SVG", "SVG icon", "vector"]
+        },
+        {
+          "text": "Preserves currentColor behavior",
+          "includes": ["currentColor"]
+        },
+        {
+          "text": "Rejects raster generation for this task",
+          "includes_any": ["do not use image_generate", "should not use image_generate", "not use raster", "avoid raster"]
+        }
+      ]
+    }
+  ]
+}

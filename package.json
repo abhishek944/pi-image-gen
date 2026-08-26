@@ -1,0 +1,83 @@
+{
+  "name": "pi-image-gen",
+  "version": "0.1.0",
+  "description": "Image generation for Pi via ChatGPT Codex subscriptions, OpenAI, Gemini, Qwen, Seedream, OpenRouter, and custom providers.",
+  "keywords": [
+    "pi-package",
+    "pi",
+    "extension",
+    "image-generation",
+    "codex",
+    "chatgpt",
+    "nano-banana",
+    "gpt-image",
+    "qwen-image",
+    "openrouter"
+  ],
+  "license": "Apache-2.0",
+  "type": "module",
+  "sideEffects": false,
+  "main": "./src/index.ts",
+  "exports": {
+    ".": {
+      "default": "./src/index.ts"
+    },
+    "./package.json": {
+      "default": "./package.json"
+    }
+  },
+  "files": [
+    "src",
+    "skills",
+    "preview.png",
+    "README.md",
+    "THIRD_PARTY_NOTICES.md"
+  ],
+  "pi": {
+    "image": "https://raw.githubusercontent.com/abhishek944/pi-image-gen/main/preview.png",
+    "extensions": [
+      "./src/index.ts"
+    ],
+    "skills": [
+      "./skills"
+    ]
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/abhishek944/pi-image-gen.git"
+  },
+  "scripts": {
+    "build": "tsc -b",
+    "typecheck": "tsc -b --pretty false",
+    "test": "vitest run src"
+  },
+  "dependencies": {
+    "@amaster.ai/pi-shared": "^0.1.10"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-ai": ">=0.80.10",
+    "@earendil-works/pi-coding-agent": ">=0.79.1",
+    "typebox": "*"
+  },
+  "peerDependenciesMeta": {
+    "@earendil-works/pi-ai": {
+      "optional": true
+    },
+    "@earendil-works/pi-coding-agent": {
+      "optional": true
+    },
+    "typebox": {
+      "optional": true
+    }
+  },
+  "devDependencies": {
+    "@earendil-works/pi-ai": "0.80.10",
+    "@earendil-works/pi-coding-agent": "0.80.10",
+    "typebox": "*",
+    "typescript": "^5.9.3",
+    "vitest": "^4.0.0"
+  }
+}
