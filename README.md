@@ -30,8 +30,16 @@ The active model is **fixed in settings.json**. The `image_generate` tool intent
 
 ## Install
 
+From npm:
+
 ```sh
-pi install git:github.com/abhishek944/pi-image-gen
+pi install npm:@abhishek944/pi-image-gen
+```
+
+Or directly from GitHub:
+
+```sh
+pi install git:github.com/abhishek944/pi-image-gen@v0.1.1
 ```
 
 The package's `pi.extensions` field auto-registers it with the host pi-coding-agent runtime; no extra wiring needed.
