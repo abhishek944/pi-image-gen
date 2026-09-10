@@ -1,4 +1,10 @@
 import { ImageGenError } from './errors.js';
+import {
+  MAX_GENERATED_IMAGES,
+  MAX_IMAGE_BYTES,
+  MAX_REFERENCE_IMAGE_INPUTS,
+  MAX_TOTAL_REFERENCE_IMAGE_BYTES,
+} from './image-input.js';
 import type { GenerateImageParams, ImageModelCapabilities } from './types.js';
 
 /**
@@ -10,9 +16,11 @@ import type { GenerateImageParams, ImageModelCapabilities } from './types.js';
  * valid values on the first call; anything it still gets wrong is answered
  * by the provider's own error — private deployments and gateways may
  * legitimately diverge from the cloud platform's documented limits, so
- * numeric limits (size ranges, n ceilings, reference counts/bytes) are never
- * hard-enforced client-side. The only pre-flight rejections are parameter
- * combinations OUR adapters would silently drop (see validateGenerateParams).
+ * provider-specific numeric limits (size ranges, n ceilings, and model-level
+ * reference counts) are not hard-enforced here. Separate extension-wide input
+ * safety ceilings are enforced while resolving images, and pre-flight also
+ * rejects parameter combinations OUR adapters would silently drop (see
+ * validateGenerateParams).
  */
 
 /** Shared pixel-size matcher ("<w>x<h>" or "<w>*<h>") — also used by the DashScope adapter. */
@@ -74,8 +82,23 @@ export function capabilitySizeDescription(caps: ImageModelCapabilities): string 
  * advisory) — advisory text; the provider enforces its own limits.
  */
 export function referenceImageDescription(caps: ImageModelCapabilities): string {
-  const mb = Math.round(caps.inputMaxBytes / (1024 * 1024));
-  let text = `The active model documents up to ${caps.maxReferenceImages} reference image(s) — formats: ${caps.inputFormats.join('/')}; each up to ${mb}MB.`;
+  const providerMb = Math.round(caps.inputMaxBytes / (1024 * 1024));
+  const localMb = Math.round(MAX_IMAGE_BYTES / (1024 * 1024));
+  const subject =
+    caps.referenceLimitsSource === 'extension'
+      ? 'This extension accepts'
+      : 'The active model documents';
+  let text = `${subject} up to ${caps.maxReferenceImages} reference image(s) — formats: ${caps.inputFormats.join('/')}; each up to ${providerMb}MB.`;
+  const localTotalMb = Math.round(MAX_TOTAL_REFERENCE_IMAGE_BYTES / (1024 * 1024));
+  if (caps.maxReferenceImages > MAX_REFERENCE_IMAGE_INPUTS) {
+    text += ` This extension enforces a lower ${MAX_REFERENCE_IMAGE_INPUTS}-image safety limit.`;
+  }
+  if (caps.inputMaxBytes > MAX_IMAGE_BYTES) {
+    text += ` This extension enforces a lower ${localMb}MB safety limit per image.`;
+  } else if (caps.referenceLimitsSource === 'extension') {
+    text += ' The provider may enforce stricter limits.';
+  }
+  text += ` Combined reference inputs are limited to ${localTotalMb}MB.`;
   if (caps.inputDimAdvice) text += ` ${caps.inputDimAdvice}.`;
   return text;
 }
@@ -88,13 +111,29 @@ export function referenceImageDescription(caps: ImageModelCapabilities): string 
  * deliberately NOT enforced here: they are advice in the schema descriptions,
  * and the provider's own error is the backstop for anything out of range.
  */
+export function validateImageCount(params: GenerateImageParams): void {
+  if (
+    params.n != null &&
+    (!Number.isInteger(params.n) || params.n < 1 || params.n > MAX_GENERATED_IMAGES)
+  ) {
+    throw new ImageGenError(
+      `n must be an integer from 1 to ${MAX_GENERATED_IMAGES} (got ${params.n}).`,
+      'n invalid',
+    );
+  }
+}
+
 export function validateGenerateParams(
   params: GenerateImageParams,
   caps: ImageModelCapabilities,
   modelId: string,
 ): void {
-  if (params.n != null && (!Number.isInteger(params.n) || params.n < 1)) {
-    throw new ImageGenError(`n must be a positive integer (got ${params.n}).`, 'n invalid');
+  validateImageCount(params);
+  if (caps.nMax === 1 && params.n != null && params.n !== 1) {
+    throw new ImageGenError(
+      `${modelId} generates one image per request and does not accept n greater than 1.`,
+      'n unsupported by model',
+    );
   }
   if (hasAspectRatioKnob(caps)) {
     if (params.size) {
@@ -122,23 +161,40 @@ export function validateGenerateParams(
  */
 export function sanitizeCapabilities(
   explicit: Partial<ImageModelCapabilities>,
-  owner: string,
+  _owner: string,
 ): Partial<ImageModelCapabilities> {
   const clean: Partial<ImageModelCapabilities> = {};
   const drop = (key: string, value: unknown, rule: string) => {
+    const shape = Array.isArray(value) ? 'array' : value === null ? 'null' : typeof value;
+    // Never echo a custom provider/model id or malformed setting value: either
+    // could contain a misplaced credential.
     console.error(
-      `[pi-image-gen] ignoring invalid capabilities.${key} for ${owner}: expected ${rule}, got ${JSON.stringify(value)?.slice(0, 80)}`,
+      `[pi-image-gen] ignoring invalid capabilities.${key} in a custom model declaration: expected ${rule}; received ${shape}`,
     );
   };
   const stringArray = (v: unknown): v is string[] =>
-    Array.isArray(v) && v.every((s) => typeof s === 'string' && s.length > 0);
+    Array.isArray(v) &&
+    v.length > 0 &&
+    v.every((s) => typeof s === 'string' && s.length > 0) &&
+    new Set(v).size === v.length;
 
   for (const [key, value] of Object.entries(explicit)) {
     if (value === undefined) continue;
     switch (key) {
       case 'nMax':
-        if (Number.isInteger(value) && (value as number) >= 1) clean.nMax = value as number;
-        else drop(key, value, 'an integer ≥ 1');
+        if (
+          Number.isInteger(value) &&
+          (value as number) >= 1 &&
+          (value as number) <= MAX_GENERATED_IMAGES
+        ) {
+          clean.nMax = value as number;
+        } else {
+          drop(key, value, `an integer from 1 to ${MAX_GENERATED_IMAGES}`);
+        }
+        break;
+      case 'nMaxSource':
+        if (value === 'provider' || value === 'extension') clean.nMaxSource = value;
+        else drop(key, value, '"provider" or "extension"');
         break;
       case 'maxReferenceImages':
         if (Number.isInteger(value) && (value as number) >= 0)
@@ -166,12 +222,20 @@ export function sanitizeCapabilities(
         if (stringArray(value)) clean.imageSizes = value;
         else drop(key, value, 'an array of size tiers');
         break;
+      case 'qualityValues':
+        if (stringArray(value)) clean.qualityValues = value;
+        else drop(key, value, 'an array of quality values');
+        break;
+      case 'referenceLimitsSource':
+        if (value === 'provider' || value === 'extension') clean.referenceLimitsSource = value;
+        else drop(key, value, '"provider" or "extension"');
+        break;
       case 'inputDimAdvice':
         if (typeof value === 'string' && value.length > 0) clean.inputDimAdvice = value;
         else drop(key, value, 'a non-empty string');
         break;
       case 'sizeRange': {
-        const range = sanitizeSizeRange(value, key, owner, drop);
+        const range = sanitizeSizeRange(value, key, drop);
         if (range) clean.sizeRange = range;
         break;
       }
@@ -185,7 +249,6 @@ export function sanitizeCapabilities(
 function sanitizeSizeRange(
   value: unknown,
   key: string,
-  owner: string,
   drop: (key: string, value: unknown, rule: string) => void,
 ): ImageModelCapabilities['sizeRange'] | undefined {
   if (typeof value !== 'object' || value === null) {
@@ -198,7 +261,7 @@ function sanitizeSizeRange(
   const maxArea = typeof raw.maxArea === 'number' && raw.maxArea > 0 ? raw.maxArea : undefined;
   if (!separator || minArea == null || maxArea == null || maxArea <= minArea) {
     console.error(
-      `[pi-image-gen] ignoring invalid capabilities.sizeRange for ${owner}: separator must be "x" or "*" and 0 < minArea < maxArea`,
+      '[pi-image-gen] ignoring invalid capabilities.sizeRange in a custom model declaration: separator must be "x" or "*" and 0 < minArea < maxArea',
     );
     return undefined;
   }
@@ -216,7 +279,7 @@ function sanitizeSizeRange(
       range.maxRatio = raw.maxRatio;
     } else {
       console.error(
-        `[pi-image-gen] ignoring capabilities.sizeRange ratio bounds for ${owner}: expected 0 < minRatio < maxRatio`,
+        '[pi-image-gen] ignoring capabilities.sizeRange ratio bounds in a custom model declaration: expected 0 < minRatio < maxRatio',
       );
     }
   }

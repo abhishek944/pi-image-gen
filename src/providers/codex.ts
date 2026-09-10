@@ -1,4 +1,4 @@
-import { resolveCodexAuth } from '../codex-auth.js';
+import { resolveCodexAuth, withoutProtectedCodexHeaders } from '../codex-auth.js';
 import { ImageGenError } from '../errors.js';
 import type { ImageProviderAdapter, ResolvedImageInput } from '../types.js';
 import { parseImagesResponse } from './openai.js';
@@ -30,7 +30,7 @@ export const codexAdapter: ImageProviderAdapter = {
     try {
       response = await fetchImpl(url, {
         method: 'POST',
-        headers: { ...provider.headers, ...auth.headers },
+        headers: { ...withoutProtectedCodexHeaders(provider.headers), ...auth.headers },
         body: JSON.stringify(body),
         signal: signal ?? null,
         redirect: 'error',

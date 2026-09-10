@@ -9,13 +9,16 @@ import {
   referenceImageDescription,
 } from './capabilities.js';
 import {
-  listConfiguredProviders,
-  listKnownModelIds,
+  canonicalProviderRouteId,
+  listProviderRoutes,
   loadImageGenSettings,
   resolveModel,
 } from './config.js';
 import { errorMessageForUser, toLogSummary } from './errors.js';
 import { generateImage } from './generate.js';
+import { MAX_GENERATED_IMAGES, MAX_REFERENCE_IMAGE_INPUTS } from './image-input.js';
+import { canUseMetaOAuth } from './providers/meta.js';
+import { SettingsWriteError, updateProjectImageGenSettings } from './settings-write.js';
 import type {
   ApiStyle,
   GenerateImageParams,
@@ -88,7 +91,7 @@ export default function piImageGenExtension(pi: ExtensionAPI): void {
       name: 'image_generate',
       label: 'ImageGen',
       description:
-        'Generate or edit images. The image model is fixed by pi-image-gen.defaultModel in settings (this tool does not accept a model parameter). Pass `image` to do image-to-image / edit / style transfer / character preservation: a regular image file inside the session cwd (absolute or relative) or a public http(s) URL. To iterate on a previous result, pass its file path back when it is inside cwd. Do NOT pass base64 or data: URIs — write bytes to a file under cwd first. Saves the output to disk and returns the absolute path(s). When reporting the result to the user, render each generated image as inline markdown — copy the `![alt](…)` line(s) from the tool result verbatim so the UI can display it; do not just paste the bare path. Run /image-gen list to see the active model.',
+        'Generate or edit images. The image provider route and model are fixed by pi-image-gen.defaultProvider/defaultModel in settings (this tool does not accept provider or model parameters). Pass `image` to do image-to-image / edit / style transfer / character preservation: a regular image file inside the session cwd (absolute or relative) or a public http(s) URL. To iterate on a previous result, pass its file path back when it is inside cwd. Do NOT pass base64 or data: URIs — write bytes to a file under cwd first. Saves the output to disk and returns the absolute path(s). When reporting the result to the user, render each generated image as inline markdown — copy the `![alt](…)` line(s) from the tool result verbatim so the UI can display it; do not just paste the bare path. Run /image-gen list to see the active model.',
       promptSnippet:
         'Generate or edit raster images (photos, illustrations, textures, mockups). Not for icons/logos/diagrams that should be repo-native SVG/CSS/canvas.',
       promptGuidelines: buildImageGuidelines(caps),
@@ -113,16 +116,7 @@ export default function piImageGenExtension(pi: ExtensionAPI): void {
           // sentence for any unexpected throw), while toLogSummary gives stderr a
           // terse category. Neither echoes a raw fs/fetch error or response body.
           console.error(`[pi-image-gen] image_generate failed: ${toLogSummary(error)}`);
-          return {
-            content: [
-              {
-                type: 'text' as const,
-                text: `image_generate failed: ${errorMessageForUser(error)}`,
-              },
-            ],
-            details: undefined,
-            isError: true,
-          };
+          throw new Error(`image_generate failed: ${errorMessageForUser(error)}`);
         }
       },
     });
@@ -135,14 +129,13 @@ export default function piImageGenExtension(pi: ExtensionAPI): void {
   });
 
   pi.registerCommand('image-gen', {
-    description: 'pi-image-gen: /image-gen [list|reload|generate <prompt>]',
+    description:
+      'pi-image-gen: /image-gen [list|reload|set provider <id>|set model <id>|use <provider> <model>|generate <prompt>]',
     handler: async (args: string | undefined, ctx: ExtensionContext) => {
       const raw = (args ?? '').trim();
       const tokens = raw.split(/\s+/).filter(Boolean);
       if (tokens[0] === 'reload') {
         settings = loadImageGenSettings(ctx.cwd, isProjectTrusted(ctx));
-        // Re-register so the schema (e.g. whether `quality` is exposed) tracks
-        // the newly loaded model, not just the settings read at execute time.
         registerImageTool();
         ctx.ui.notify('pi-image-gen settings reloaded.', 'info');
         return;
@@ -161,71 +154,216 @@ export default function piImageGenExtension(pi: ExtensionAPI): void {
             ctx.signal,
             ctx.modelRegistry as unknown as ImageModelRegistry,
           );
-          // notify() renders as a plain status line, not markdown — surface a
-          // readable path summary here rather than `![](…)` image syntax (which
-          // would show up literally). The tool path keeps markdown for the LLM.
           ctx.ui.notify(formatCommandSummary(result), 'info');
         } catch (error) {
-          // Terse category summary to stderr; the notify surface gets the fuller
-          // (still body-free) sanitized message. See execute() and errors.ts.
           console.error(`[pi-image-gen] /image-gen generate failed: ${toLogSummary(error)}`);
           ctx.ui.notify(`image generation failed: ${errorMessageForUser(error)}`, 'error');
         }
         return;
       }
-      const providers = listConfiguredProviders(settings);
-      const defaultModel = settings.defaultModel?.trim();
-      let activeLine = `Default model: ${defaultModel ?? '(not set — configure pi-image-gen.defaultModel in settings.json)'}`;
-      if (defaultModel) {
-        const resolved = resolveModel(defaultModel, settings);
-        if ('error' in resolved) {
-          activeLine += `\n  ! ${resolved.error}`;
-        } else {
-          const provider = resolved.provider;
-          const authStatus =
-            provider.api === 'codex'
-              ? 'auth: Pi ChatGPT login'
-              : provider.apiKey
-                ? 'apiKey: set'
-                : 'apiKey: MISSING';
-          activeLine += `\n  routes to: ${provider.id} [${provider.api}] ${provider.builtIn ? '' : '(custom) '}${authStatus}`;
+
+      const saveDefaults = async (
+        update: Pick<ImageGenSettings, 'defaultProvider' | 'defaultModel'>,
+      ): Promise<boolean> => {
+        try {
+          await updateProjectImageGenSettings(ctx.cwd, isProjectTrusted(ctx), update);
+          settings = loadImageGenSettings(ctx.cwd, isProjectTrusted(ctx));
+          registerImageTool();
+          return true;
+        } catch (error) {
+          const message =
+            error instanceof SettingsWriteError
+              ? error.message
+              : 'Could not update project settings.';
+          ctx.ui.notify(message, 'error');
+          return false;
         }
+      };
+
+      if (tokens[0] === 'set' && tokens[1] === 'provider') {
+        if (tokens.length !== 3) {
+          ctx.ui.notify('Usage: /image-gen set provider <provider>', 'error');
+          return;
+        }
+        const provider = canonicalProviderRouteId(tokens[2]!, settings);
+        if (!provider) {
+          const detail = tokens[2] === 'meta' ? ' Use meta-api or meta-subscription.' : '';
+          ctx.ui.notify(`Unknown provider route "${tokens[2]}".${detail} Run /image-gen list.`, 'error');
+          return;
+        }
+        if (!(await saveDefaults({ defaultProvider: provider }))) return;
+        const current = trimmedSetting(settings.defaultModel);
+        const pairing = current ? resolveModel(current, settings) : undefined;
+        const warning = pairing && 'error' in pairing ? ` ${pairing.error}` : '';
+        ctx.ui.notify(`Default provider set to ${provider}.${warning}`, warning ? 'warning' : 'info');
+        return;
       }
+
+      if (tokens[0] === 'set' && tokens[1] === 'model') {
+        if (tokens.length !== 3) {
+          ctx.ui.notify('Usage: /image-gen set model <model>', 'error');
+          return;
+        }
+        if (!trimmedSetting(settings.defaultProvider)) {
+          ctx.ui.notify(
+            'Set a provider first, or use /image-gen use <provider> <model> to select both.',
+            'error',
+          );
+          return;
+        }
+        const model = tokens[2]!;
+        const pairing = resolveModel(model, { ...settings, defaultModel: model });
+        if ('error' in pairing) {
+          ctx.ui.notify(pairing.error, 'error');
+          return;
+        }
+        if (!(await saveDefaults({ defaultModel: model }))) return;
+        ctx.ui.notify(`Default model set to ${model}.`, 'info');
+        return;
+      }
+
+      if (tokens[0] === 'use') {
+        if (tokens.length !== 3) {
+          ctx.ui.notify('Usage: /image-gen use <provider> <model>', 'error');
+          return;
+        }
+        const provider = canonicalProviderRouteId(tokens[1]!, settings);
+        if (!provider) {
+          const detail = tokens[1] === 'meta' ? ' Use meta-api or meta-subscription.' : '';
+          ctx.ui.notify(`Unknown provider route "${tokens[1]}".${detail} Run /image-gen list.`, 'error');
+          return;
+        }
+        const model = tokens[2]!;
+        const pairing = resolveModel(model, {
+          ...settings,
+          defaultProvider: provider,
+          defaultModel: model,
+        });
+        if ('error' in pairing) {
+          ctx.ui.notify(pairing.error, 'error');
+          return;
+        }
+        if (!(await saveDefaults({ defaultProvider: provider, defaultModel: model }))) return;
+        ctx.ui.notify(`Using ${provider} with ${model}.`, 'info');
+        return;
+      }
+
+      if (tokens.length > 0 && tokens[0] !== 'list') {
+        ctx.ui.notify(
+          'Usage: /image-gen [list|reload|set provider <id>|set model <id>|use <provider> <model>|generate <prompt>]',
+          'error',
+        );
+        return;
+      }
+
+      const registry = ctx.modelRegistry as unknown as ImageModelRegistry;
+      const loginStatus = discoverLoginRoutes(registry, settings);
+      const routes = listProviderRoutes(settings).map((route) => ({
+        ...route,
+        configured:
+          route.configuredBySettings ||
+          (route.id === 'codex-subscription' && loginStatus.codex) ||
+          (route.id === 'meta-subscription' && loginStatus.meta),
+      }));
+      const configured = routes.filter((route) => route.configured);
+      const defaultModel = trimmedSetting(settings.defaultModel);
+      const resolvedDefault = defaultModel ? resolveModel(defaultModel, settings) : undefined;
+      const defaultProvider = describeDefaultProvider(settings, resolvedDefault, loginStatus.meta);
+      const defaultProblem = resolvedDefault && 'error' in resolvedDefault ? resolvedDefault.error : undefined;
       const lines = [
-        activeLine,
-        `Output dir: ${settings.outputDir ?? '.pi/images'}`,
+        `Output directory: ${typeof settings.outputDir === 'string' && settings.outputDir.trim() ? settings.outputDir : '.pi/images'}`,
+        `Default provider: ${defaultProvider}`,
+        `Default model: ${defaultModel ?? '(not set)'}`,
+        ...(defaultProblem ? [`  ! ${defaultProblem}`] : []),
         '',
         'Configured providers:',
-        ...(providers.length
-          ? providers.map((p) => {
-              const tags: string[] = [`[${p.api}]`];
-              if (!p.builtIn) tags.push('(custom)');
-              if (p.catchAll) tags.push('(catch-all — accepts any model)');
-              else if (p.modelCount > 0)
-                tags.push(`(${p.modelCount} model${p.modelCount === 1 ? '' : 's'})`);
-              return `  - ${p.id} ${tags.join(' ')}`;
-            })
+        ...(configured.length > 0
+          ? configured.map(
+              (route) =>
+                `  - ${route.label} (${route.id}; ${route.authentication === 'subscription' ? 'Pi login' : route.authentication})`,
+            )
           : [
-              '  (none — set OPENAI_API_KEY / GEMINI_API_KEY / DASHSCOPE_API_KEY / OPENROUTER_API_KEY / ARK_API_KEY)',
+              '  (none — set OPENAI_API_KEY / GEMINI_API_KEY / DASHSCOPE_API_KEY / OPENROUTER_API_KEY / ARK_API_KEY / META_API_KEY, or use /login for Meta/Codex)',
             ]),
         '',
-        'Built-in models:',
-        ...listKnownModelIds().map((m) => `  - ${m}`),
+        'Available providers and models:',
+        ...routes.flatMap((route) => [
+          `  ${route.label} (${route.id}) [${route.configured ? 'configured' : 'not configured'}]`,
+          ...(route.modelIds.length > 0
+            ? route.modelIds.map((model) => `    - ${model}`)
+            : route.acceptsAnyModel
+              ? ['    - <model-id> (pass-through; provider catalog is not fixed)']
+              : ['    - (no models declared)']),
+        ]),
       ];
       ctx.ui.notify(lines.join('\n'), 'info');
     },
   });
 }
 
+function trimmedSetting(value: unknown): string | undefined {
+  if (typeof value !== 'string') return undefined;
+  return value.trim() || undefined;
+}
+
+function discoverLoginRoutes(
+  registry: ImageModelRegistry,
+  settings: ImageGenSettings,
+): { codex: boolean; meta: boolean } {
+  try {
+    const available = registry.getAvailable();
+    const isOAuth = (model: (typeof available)[number]): boolean => {
+      if (!registry.isUsingOAuth) return false;
+      try {
+        return registry.isUsingOAuth(model);
+      } catch {
+        return false;
+      }
+    };
+    const codex = available.some(
+      (model) => model.provider === 'openai-codex' && isOAuth(model),
+    );
+    const metaRoute = resolveModel('muse-image-1.0', {
+      ...settings,
+      defaultProvider: 'meta-subscription',
+    });
+    const officialMetaRoute = !('error' in metaRoute) && canUseMetaOAuth(metaRoute.provider);
+    const meta =
+      officialMetaRoute &&
+      available.some((model) => model.provider === 'meta' && isOAuth(model));
+    return { codex, meta };
+  } catch {
+    return { codex: false, meta: false };
+  }
+}
+
+function describeDefaultProvider(
+  settings: ImageGenSettings,
+  resolved: ReturnType<typeof resolveModel> | undefined,
+  hasMetaLogin: boolean,
+): string {
+  const selected = trimmedSetting(settings.defaultProvider);
+  if (settings.defaultProvider !== undefined && !selected) return '(invalid: blank)';
+  if (selected) return canonicalProviderRouteId(selected, settings) ?? `${selected} (invalid)`;
+  if (!resolved || 'error' in resolved) return '(not set)';
+  const provider = resolved.provider;
+  if (!provider.builtIn) return `${provider.id} (inferred)`;
+  if (provider.id === 'codex') return 'codex-subscription (inferred)';
+  if (provider.id === 'meta') {
+    return `${hasMetaLogin ? 'meta-subscription' : 'meta-api'} (inferred)`;
+  }
+  return `${provider.id}-api (inferred)`;
+}
+
 /**
- * The `low`/`medium`/`high`/`auto` vocabulary is specific to OpenAI's **gpt-image**
+ * The verified quality vocabulary is specific to OpenAI's **gpt-image**
  * family. Other OpenAI-wire models served under the same API use a different
  * vocabulary — DALL·E 3, for instance, takes `standard`/`hd` — so matching the
  * wire format (or even the built-in `openai` provider) is not enough; we must
  * see a gpt-image model id.
  *
  * This holds for two routes to gpt-image:
- *   - the built-in OpenAI provider (remote id `gpt-image-2`), and
+ *   - the built-in OpenAI provider (remote ids in the `gpt-image-*` family), and
  *   - OpenRouter, whose remote id embeds the underlying model (`openai/gpt-image-2`).
  *
  * It deliberately excludes `openai/dall-e-3` (built-in openai, but non-gpt-image)
@@ -250,15 +388,19 @@ function honorsGptImageQuality(api: ApiStyle, remoteId: string): boolean {
  * friendly config error.
  */
 export function resolveImageToolCapabilities(settings: ImageGenSettings): ImageToolCapabilities {
-  const defaultModel = settings.defaultModel?.trim();
+  const defaultModel = trimmedSetting(settings.defaultModel);
   if (!defaultModel) return { api: null, quality: QUALITY_VALUES, model: null };
   const resolved = resolveModel(defaultModel, settings);
   if ('error' in resolved) return { api: null, quality: QUALITY_VALUES, model: null };
   const { provider } = resolved;
   const quality =
     provider.builtIn && honorsGptImageQuality(provider.api, resolved.remoteId)
-      ? QUALITY_VALUES
-      : null;
+      ? (resolved.capabilities?.qualityValues ?? QUALITY_VALUES)
+      : !provider.builtIn &&
+          resolved.customQualityValues &&
+          (provider.api === 'openai' || provider.api === 'openrouter')
+        ? (resolved.capabilities?.qualityValues ?? null)
+        : null;
   return { api: provider.api, quality, model: resolved.capabilities ?? null };
 }
 
@@ -271,12 +413,15 @@ export function sizeDescription(api: ApiStyle | null): string {
   if (api === 'ark') {
     return 'Image size such as "2048x2048". Seedream 5.0 / 5.0-lite / 4.5 require 2K or larger — "1024x1024" fails with InvalidParameter; only Seedream 4.0 accepts 1K sizes.';
   }
+  if (api === 'meta') {
+    return 'Image size passed to Meta\'s image_generation tool. Official cookbook examples include "1024x1024", "1536x1024", and "1024x1536"; the provider validates the complete supported set.';
+  }
   return 'Image size hint such as "1024x1024". Provider-specific; ignored if unsupported.';
 }
 
 /** Capability-independent part of the `image` parameter description. */
 const IMAGE_PARAM_BASE =
-  'Optional reference image(s) for image-to-image / edit / style transfer / character preservation. Each entry MUST be either (a) a regular image file inside the session cwd — absolute or relative — or (b) a public http(s) URL. Symlinks, Base64 strings, and data: URIs are rejected; write raw image bytes to a file under cwd first. For a single image pass ["path"]. Multi-image conditioning is supported by OpenAI gpt-image-2, Gemini, and Qwen sync models. To iterate on a previous output inside cwd, pass that file path here.';
+  'Optional reference image(s) for image-to-image / edit / style transfer / character preservation. Each entry MUST be either (a) a regular image file inside the session cwd — absolute or relative — or (b) a public http(s) URL. Symlinks, Base64 strings, and data: URIs are rejected; write raw image bytes to a file under cwd first. For a single image pass ["path"]. Multi-image conditioning is supported by OpenAI GPT Image models, Gemini, Qwen sync models, and Meta Muse Image. To iterate on a previous output inside cwd, pass that file path here.';
 
 /**
  * Build the `image_generate` parameter schema for the resolved capabilities.
@@ -308,23 +453,24 @@ export function buildImageToolParameters(caps: ImageToolCapabilities) {
     }),
     image: Type.Optional(
       Type.Array(Type.String(), {
+        maxItems: MAX_REFERENCE_IMAGE_INPUTS,
         description: model
           ? `${IMAGE_PARAM_BASE} ${referenceImageDescription(model)}`
           : IMAGE_PARAM_BASE,
       }),
     ),
-    ...(!model || model.nMax > 1
+    ...(caps.api !== 'meta' && caps.api !== 'ark' && (!model || model.nMax > 1)
       ? {
           n: Type.Optional(
-            Type.Number({
+            Type.Integer({
               minimum: 1,
-              // Advisory only: the documented ceiling goes in the description,
-              // not a schema `maximum` — a private deployment may legitimately
-              // differ from the cloud docs, and the provider's error is the
-              // backstop. The no-contract fallback keeps the original wording.
+              maximum: MAX_GENERATED_IMAGES,
+              // Model/provider ceilings remain advisory in the description,
+              // while the extension-wide safety ceiling is enforced above.
+              // A private deployment may still differ below that global ceiling.
               description: model
-                ? `Number of images. Default 1 (integer; the active model documents up to ${model.nMax}).`
-                : 'Number of images. Default 1 (integer).',
+                ? `Number of images. Default 1 (integer; ${model.nMaxSource === 'extension' ? 'this extension supports' : 'the active model documents'} up to ${model.nMax}).`
+                : `Number of images. Default 1 (integer; this extension supports up to ${MAX_GENERATED_IMAGES}).`,
             }),
           ),
         }
@@ -361,8 +507,9 @@ export function buildImageToolParameters(caps: ImageToolCapabilities) {
       ? {
           quality: Type.Optional(
             StringEnum(caps.quality, {
-              description:
-                'Quality level honored by the active provider (OpenAI gpt-image / OpenRouter): "low" for fast drafts/thumbnails, "medium", "high" for final assets or dense text, or "auto".',
+              description: caps.quality.includes('low')
+                ? `Quality level honored by the active provider. Allowed values: ${caps.quality.join(', ')}. Use "low" for fast drafts/thumbnails and a higher quality for final assets or dense text.`
+                : `Quality level honored by the active provider. Allowed values: ${caps.quality.join(', ')}. Choose the value that matches the requested output.`,
             }),
           ),
         }
@@ -384,7 +531,8 @@ export function buildImageToolParameters(caps: ImageToolCapabilities) {
  * model cannot use.
  */
 export function buildImageGuidelines(caps: ImageToolCapabilities): string[] {
-  const showN = !caps.model || caps.model.nMax > 1;
+  const showN =
+    caps.api !== 'meta' && caps.api !== 'ark' && (!caps.model || caps.model.nMax > 1);
   const guidelines = [
     'Use image_generate for bitmap assets: photos, illustrations, textures, sprites, product/UI mockups, concept art. Do NOT use it for icons, logos, or diagrams that should match existing repo-native SVG/vector/CSS/canvas assets — edit or write those directly instead.',
     'Generate vs edit: with no `image`, or when `image` entries are only style/composition/mood references, this is a fresh generation. To modify an existing image while preserving most of it, pass that image and describe the change as an edit.',
@@ -397,9 +545,11 @@ export function buildImageGuidelines(caps: ImageToolCapabilities): string[] {
     'For text inside an image, quote the exact string verbatim and specify placement; spell uncommon words letter-by-letter when accuracy matters.',
   ];
   guidelines.push(
-    caps.quality
+    caps.quality?.includes('low')
       ? 'Prefer one targeted change per iteration over rewriting the whole prompt. Use `quality: "low"` for fast drafts and a higher `quality` for final assets or dense text.'
-      : 'Prefer one targeted change per iteration over rewriting the whole prompt.',
+      : caps.quality
+        ? `Prefer one targeted change per iteration over rewriting the whole prompt. Choose quality from the active values: ${caps.quality.join(', ')}.`
+        : 'Prefer one targeted change per iteration over rewriting the whole prompt.',
   );
   if (caps.model && hasAspectRatioKnob(caps.model)) {
     guidelines.push(

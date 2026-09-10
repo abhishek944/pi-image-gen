@@ -4,6 +4,7 @@ import { arkAdapter } from './ark.js';
 import { codexAdapter } from './codex.js';
 import { dashscopeAdapter } from './dashscope.js';
 import { geminiAdapter } from './gemini.js';
+import { metaAdapter } from './meta.js';
 import { openaiAdapter } from './openai.js';
 import { openrouterAdapter } from './openrouter.js';
 
@@ -13,6 +14,7 @@ const ADAPTERS: Record<ApiStyle, ImageProviderAdapter> = {
   dashscope: dashscopeAdapter,
   openrouter: openrouterAdapter,
   ark: arkAdapter,
+  meta: metaAdapter,
   codex: codexAdapter,
 };
 

@@ -59,9 +59,10 @@ export function providerLogLabel(provider: ResolvedProvider): string {
 
 /** Missing-API-key error naming the exact env var / settings path to fix. */
 export function missingKeyError(provider: ResolvedProvider): ImageGenError {
+  const credential = metaSupportsPiLogin(provider) ? 'usable credential' : 'API key';
   return new ImageGenError(
-    `Provider "${provider.id}" has no API key. Tell the user to set ${providerLocator(provider)}.`,
-    `${providerLogLabel(provider)} missing API key`,
+    `Provider "${provider.id}" has no ${credential}. Tell the user to set ${providerLocator(provider)}.`,
+    `${providerLogLabel(provider)} missing ${credential}`,
   );
 }
 
@@ -86,8 +87,9 @@ export function classifyHttpError(res: Response, provider: ResolvedProvider): Im
   const err = (message: string) => new ImageGenError(message, summary);
 
   if (res.status === 401 || res.status === 403) {
+    const credential = metaSupportsPiLogin(provider) ? 'credential' : 'API key';
     return err(
-      `${provider.name} rejected the API key (HTTP ${res.status}). Tell the user to verify ${where}. Do not retry — this will keep failing until the key is fixed.`,
+      `${provider.name} rejected the ${credential} (HTTP ${res.status}). Tell the user to verify ${where}. Do not retry — this will keep failing until the credential is fixed.`,
     );
   }
   if (res.status === 404) {
@@ -257,10 +259,35 @@ export function cancelledError(what: string): ImageGenError {
  */
 function providerLocator(provider: ResolvedProvider): string {
   if (provider.builtIn) {
+    if (provider.id === 'meta') {
+      const apiKeyOptions = 'the META_API_KEY env var or pi-image-gen.providers.meta.apiKey in settings.json (legacy MODEL_API_KEY is also accepted)';
+      if (provider.authMode === 'oauth') return '`/login meta`';
+      return metaSupportsPiLogin(provider) ? `\`/login meta\`, ${apiKeyOptions}` : apiKeyOptions;
+    }
     const envVar = BUILT_IN_ENV_VAR[provider.id] ?? `${provider.id.toUpperCase()}_API_KEY`;
     return `the ${envVar} env var (or pi-image-gen.providers.${provider.id}.apiKey in settings.json)`;
   }
   return `pi-image-gen.customProviders.${provider.id}.apiKey in settings.json`;
+}
+
+function metaSupportsPiLogin(provider: ResolvedProvider): boolean {
+  if (!provider.builtIn || provider.id !== 'meta' || provider.authMode === 'api-key') return false;
+  try {
+    const trimmed = provider.baseUrl.replace(/\/+$/, '');
+    const url = new URL(trimmed);
+    const path = url.pathname === '' || url.pathname === '/' ? '/v1' : url.pathname;
+    return (
+      url.protocol === 'https:' &&
+      url.hostname === 'api.meta.ai' &&
+      url.port === '' &&
+      url.username === '' &&
+      url.password === '' &&
+      path === '/v1' &&
+      (url.pathname === '/' || url.pathname === '' || (url.search === '' && url.hash === ''))
+    );
+  } catch {
+    return false;
+  }
 }
 
 function providerBaseUrlLocator(provider: ResolvedProvider): string {
@@ -276,4 +303,5 @@ const BUILT_IN_ENV_VAR: Record<string, string> = {
   dashscope: 'DASHSCOPE_API_KEY',
   openrouter: 'OPENROUTER_API_KEY',
   ark: 'ARK_API_KEY',
+  meta: 'META_API_KEY',
 };

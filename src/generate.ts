@@ -6,7 +6,7 @@ import {
   type TrustedHosts,
   trustedHostsFromUrls,
 } from '@amaster.ai/pi-shared';
-import { validateGenerateParams } from './capabilities.js';
+import { validateGenerateParams, validateImageCount } from './capabilities.js';
 import { resolveModel } from './config.js';
 import {
   cancelledError,
@@ -52,6 +52,10 @@ const MIME_TO_EXT: Record<string, string> = {
   'image/jpg': 'jpg',
   'image/webp': 'webp',
   'image/gif': 'gif',
+  'image/bmp': 'bmp',
+  'image/tiff': 'tiff',
+  'image/heic': 'heic',
+  'image/heif': 'heif',
 };
 
 export async function generateImage(
@@ -61,12 +65,13 @@ export async function generateImage(
   const fetchImpl = options.fetchImpl ?? fetch;
   const now = options.now ?? (() => new Date());
 
-  const requested = (options.settings.defaultModel ?? '').trim();
+  const configuredModel: unknown = options.settings.defaultModel;
+  const requested = typeof configuredModel === 'string' ? configuredModel.trim() : '';
   if (!requested) {
     // Config errors are ImageGenErrors so they survive the body-free log sink
     // with their actionable text — none of them carry secrets/user content.
     throw new ImageGenError(
-      'pi-image-gen.defaultModel is not set. Configure it in settings.json (e.g. "defaultModel": "nano-banana"). Run /image-gen list to see configured providers.',
+      'pi-image-gen.defaultModel is not set. Run /image-gen list, then /image-gen use <provider> <model> (for example, /image-gen use gemini-api nano-banana).',
       'defaultModel not set',
     );
   }
@@ -74,6 +79,17 @@ export async function generateImage(
   const resolved = resolveModel(requested, options.settings);
   if ('error' in resolved) throw new ImageGenError(resolved.error, 'model did not resolve');
 
+  validateImageCount(params);
+  if (
+    (resolved.provider.api === 'ark' || resolved.provider.api === 'meta') &&
+    params.n != null &&
+    params.n !== 1
+  ) {
+    throw new ImageGenError(
+      `${resolved.requestedId} generates one image per request and does not accept n greater than 1.`,
+      'n unsupported by provider API',
+    );
+  }
   // Pre-flight guards only against parameter combinations our adapters would
   // silently drop (see capabilities.ts) — documented numeric limits are
   // schema-description advice, and the provider's error is the backstop.
@@ -102,7 +118,11 @@ export async function generateImage(
 
   if (options.signal?.aborted) throw cancelledError('image generation');
 
-  const outDir = resolveOutputDir(params.outputDir ?? options.settings.outputDir, options.cwd);
+  const configuredOutputDir: unknown = options.settings.outputDir;
+  const outDir = resolveOutputDir(
+    params.outputDir ?? (typeof configuredOutputDir === 'string' ? configuredOutputDir : undefined),
+    options.cwd,
+  );
   try {
     await mkdir(outDir, { recursive: true });
   } catch (error) {
@@ -262,7 +282,8 @@ async function materialize(
       );
     }
     const bytes = Buffer.from(raw.data.bytes, 'base64');
-    if (bytes.byteLength > MAX_IMAGE_BYTES || !sniffMime(bytes)) {
+    const sniffedMimeType = sniffMime(bytes);
+    if (bytes.byteLength > MAX_IMAGE_BYTES || !sniffedMimeType) {
       throw new ImageGenError(
         'Provider returned invalid or oversized image bytes.',
         'generated image rejected (invalid or too large)',
@@ -270,7 +291,7 @@ async function materialize(
     }
     return {
       bytes,
-      mimeType: raw.data.mimeType ?? 'image/png',
+      mimeType: sniffedMimeType,
     };
   }
   if (!raw.data.url || !/^https?:\/\//i.test(raw.data.url)) {

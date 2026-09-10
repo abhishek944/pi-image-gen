@@ -32,7 +32,7 @@ export async function resolveCodexAuth(registry: ImageModelRegistry): Promise<Co
     .getAvailable()
     .filter((candidate) => candidate.provider === 'openai-codex')
     .sort((a, b) => a.id.localeCompare(b.id))[0];
-  if (!model) {
+  if (!model || !isConfirmedOAuth(registry, model)) {
     throw new ImageGenError(
       'No ChatGPT Plus/Pro Codex login is available. Run /login and select ChatGPT Plus/Pro (Codex).',
       'Codex login missing',
@@ -50,7 +50,7 @@ export async function resolveCodexAuth(registry: ImageModelRegistry): Promise<Co
   const token = resolved.apiKey;
   return {
     headers: {
-      ...resolved.headers,
+      ...withoutProtectedHeaders(resolved.headers),
       authorization: `Bearer ${token}`,
       'ChatGPT-Account-ID': extractCodexAccountId(token),
       originator: 'pi',
@@ -58,6 +58,39 @@ export async function resolveCodexAuth(registry: ImageModelRegistry): Promise<Co
       accept: 'application/json',
     },
   };
+}
+
+export function withoutProtectedCodexHeaders(
+  headers: Record<string, string> | undefined,
+): Record<string, string> {
+  return withoutProtectedHeaders(headers);
+}
+
+function withoutProtectedHeaders(
+  headers: Record<string, string> | undefined,
+): Record<string, string> {
+  const protectedNames = new Set([
+    'authorization',
+    'content-type',
+    'chatgpt-account-id',
+    'originator',
+    'accept',
+  ]);
+  return Object.fromEntries(
+    Object.entries(headers ?? {}).filter(([name]) => !protectedNames.has(name.toLowerCase())),
+  );
+}
+
+function isConfirmedOAuth(
+  registry: ImageModelRegistry,
+  model: ReturnType<ImageModelRegistry['getAvailable']>[number],
+): boolean {
+  if (!registry.isUsingOAuth) return false;
+  try {
+    return registry.isUsingOAuth(model);
+  } catch {
+    return false;
+  }
 }
 
 function invalidLoginError(): ImageGenError {

@@ -39,6 +39,7 @@ export const openrouterAdapter: ImageProviderAdapter = {
     if (params.quality) body.quality = params.quality;
     if (inputs && inputs.length > 0) {
       body.input_references = inputs.map((input) => ({
+        type: 'image_url',
         image_url: { url: toDataUri(input) },
       }));
     }

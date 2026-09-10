@@ -24,6 +24,7 @@ export type BuiltInModelEntry = {
 const QWEN_INPUT_FORMATS = ['JPG', 'JPEG', 'PNG', 'BMP', 'TIFF', 'WEBP', 'GIF'];
 const SEEDREAM_INPUT_FORMATS = ['JPEG', 'PNG', 'WEBP', 'BMP', 'TIFF', 'GIF', 'HEIC', 'HEIF'];
 const GEMINI_INPUT_FORMATS = ['PNG', 'JPEG', 'WEBP', 'HEIC', 'HEIF'];
+const META_INPUT_FORMATS = ['PNG', 'JPEG', 'GIF', 'WEBP', 'BMP', 'TIFF', 'HEIC', 'HEIF'];
 
 // Contract fragments shared by sibling entries.
 const SEEDREAM_DIM_ADVICE =
@@ -79,6 +80,7 @@ export const BUILT_IN_MODELS: BuiltInModelEntry[] = [
     remoteId: 'gpt-image-2',
     capabilities: {
       sizes: ['auto', '1024x1024', '1536x1024', '1024x1536'],
+      qualityValues: ['low', 'medium', 'high', 'auto'],
       nMax: 1,
       maxReferenceImages: 5,
       inputFormats: ['PNG', 'WEBP', 'JPEG'],
@@ -104,10 +106,63 @@ export const BUILT_IN_MODELS: BuiltInModelEntry[] = [
         divisibleBy: 16,
         maxEdge: 3840,
       },
+      qualityValues: ['low', 'medium', 'high', 'auto'],
       nMax: 10,
       maxReferenceImages: 16,
       inputFormats: ['PNG', 'WEBP', 'JPEG'],
       inputMaxBytes: 50 * MB,
+    },
+  },
+
+  // GPT Image 2.5 adds xhigh/max and supports the same arbitrary-size range
+  // documented for GPT Image 2. The Images API publishes n=1..10. Reference
+  // metadata stays on conservative extension ceilings where the checked docs
+  // do not publish a narrower model-specific edit-input contract.
+  ...([
+    'gpt-image-2.5-flare',
+    'gpt-image-2.5-flare-2026-09-08',
+    'gpt-image-2.5-sunburst',
+    'gpt-image-2.5-sunburst-2026-09-08',
+  ] as const).map((id) => ({
+    id,
+    provider: 'openai' as const,
+    capabilities: {
+      sizeRange: {
+        separator: 'x' as const,
+        allowAuto: true,
+        minArea: 655_360,
+        maxArea: 8_294_400,
+        minRatio: 1 / 3,
+        maxRatio: 3,
+        divisibleBy: 16,
+        maxEdge: 3840,
+      },
+      qualityValues: ['low', 'medium', 'high', 'xhigh', 'max', 'auto'],
+      nMax: 10,
+      maxReferenceImages: 16,
+      inputFormats: ['PNG', 'WEBP', 'JPEG'],
+      inputMaxBytes: 20 * MB,
+      referenceLimitsSource: 'extension' as const,
+    },
+  })),
+
+  // Meta Muse Image via the Meta Model API Responses endpoint. The official
+  // cookbook demonstrates square, landscape, and portrait output sizes and
+  // multiple reference images. Input metadata below is an extension safety
+  // contract rather than an asserted provider limit. Requests are stateless in this
+  // extension; callers iterate by passing the previous output as an input image.
+  {
+    id: 'muse-image-1.0',
+    aliases: ['muse-image', 'meta-muse'],
+    provider: 'meta',
+    capabilities: {
+      // Meta's public cookbook demonstrates these sizes but does not publish an
+      // exhaustive enum, so size stays a free-form provider-validated string.
+      nMax: 1,
+      maxReferenceImages: 16,
+      inputFormats: META_INPUT_FORMATS,
+      inputMaxBytes: 20 * MB,
+      referenceLimitsSource: 'extension',
     },
   },
 
@@ -335,6 +390,7 @@ export const DEFAULT_BASE_URL: Record<BuiltInProviderId, string> = {
   dashscope: 'https://dashscope.aliyuncs.com/api/v1',
   openrouter: 'https://openrouter.ai/api/v1',
   ark: 'https://ark.cn-beijing.volces.com/api/v3',
+  meta: 'https://api.meta.ai/v1',
   codex: 'https://chatgpt.com/backend-api/codex/images',
 };
 
@@ -344,6 +400,7 @@ export const DEFAULT_API_STYLE: Record<BuiltInProviderId, ApiStyle> = {
   dashscope: 'dashscope',
   openrouter: 'openrouter',
   ark: 'ark',
+  meta: 'meta',
   codex: 'codex',
 };
 
@@ -353,6 +410,7 @@ export const ENV_VARS: Partial<Record<BuiltInProviderId, string>> = {
   dashscope: 'DASHSCOPE_API_KEY',
   openrouter: 'OPENROUTER_API_KEY',
   ark: 'ARK_API_KEY',
+  meta: 'META_API_KEY',
 };
 
 export const PROVIDER_DISPLAY_NAME: Record<BuiltInProviderId, string> = {
@@ -361,5 +419,6 @@ export const PROVIDER_DISPLAY_NAME: Record<BuiltInProviderId, string> = {
   dashscope: 'Alibaba DashScope',
   openrouter: 'OpenRouter',
   ark: 'Volcengine Ark',
+  meta: 'Meta Model API',
   codex: 'ChatGPT Plus/Pro (Codex)',
 };

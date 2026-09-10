@@ -2,4 +2,6 @@ node_modules/
 dist/
 *.tsbuildinfo
 *.tgz
+var/
+.pi/loops/
 .DS_Store

@@ -5,7 +5,7 @@ description: "Generate or edit raster images with the image_generate tool: photo
 
 # Image generation
 
-This skill guides use of the `image_generate` tool from `@amaster.ai/pi-image-gen`. The active model is fixed by `pi-image-gen.defaultModel` in settings — the tool has **no `model` parameter**. Run `/image-gen list` to see the active model, its provider, and whether its API key is set.
+This skill guides use of the `image_generate` tool from `@abhishek944/pi-image-gen`. The active provider route and model are fixed by `pi-image-gen.defaultProvider` and `pi-image-gen.defaultModel` — the tool has **no `model` parameter**. Run `/image-gen list` to see configured authentication routes and their models; use `/image-gen use <provider> <model>` to persist a new pair and refresh the schema.
 
 ## When to use
 
@@ -78,10 +78,11 @@ Start from a clean base prompt, then make **one targeted change at a time** and 
 ## Parameters
 
 - `prompt` (required) — what to draw or how to edit.
-- `image` — array of reference/target image paths or URLs.
-- `n` — 1–8 variants of the one prompt (default 1).
-- `size` — e.g. `"1024x1024"`. Provider-specific; some models require a minimum (Seedream ≥ 4.5 needs 2K+, so `1024x1024` fails there).
-- `quality` — one of `"low"` / `"medium"` / `"high"` / `"auto"` (`"low"` for fast drafts/thumbnails, `"high"` for final assets or dense text). This parameter is **provider-conditional**: it only exists in the tool schema for a built-in gpt-image route — the built-in OpenAI provider on a `gpt-image-*` model, or an OpenRouter route whose model id is gpt-image (e.g. `openrouter/openai/gpt-image-2`). It is absent for Gemini, DashScope/Qwen, Ark/Seedream (Seedream varies quality by `size` resolution tier instead), for non-gpt-image routes like `openai/dall-e-3` or an OpenRouter route to a non-OpenAI model, and for any custom provider — even OpenAI-compatible ones, since their quality vocabulary may differ (e.g. DALL·E 3 uses `standard`/`hd`). If you don't see a `quality` parameter, the active provider has no such knob; do not try to force it.
+- Meta Muse Image authentication — use the explicit `meta-subscription` route after `/login meta` from `pi-meta-oauth`, or `meta-api` with `META_API_KEY` (`MODEL_API_KEY` remains a legacy fallback). In a legacy model-only config, an active login takes precedence. Explicit routes never cross-fallback, and custom or overridden endpoints never receive the Pi login credential.
+- `image` — array of reference/target image paths or URLs. Extension-wide safety ceilings are 16 images, 20MB per input, and 128MB combined; providers may be stricter.
+- `n` — model-specific variants of one prompt (default 1; universal extension maximum 10, with the schema description naming any lower active ceiling, such as 6 for Qwen). It is hidden for models such as Seedream and Meta Muse Image that return one image per request; direct calls requesting more than one are rejected.
+- `size` — e.g. `"1024x1024"`. Provider-specific; some models require a minimum (Seedream ≥ 4.5 needs 2K+, so `1024x1024` fails there). Meta Muse Image accepts a free-form size; official cookbook examples include `1024x1024`, `1536x1024`, and `1024x1536`.
+- `quality` — model-specific. GPT Image 2 and the verified Codex route expose `"low"` / `"medium"` / `"high"` / `"auto"`; OpenAI API models `gpt-image-2.5-flare` and `gpt-image-2.5-sunburst` also expose `"xhigh"` and `"max"`. This parameter is **provider-conditional**: it only exists in the tool schema for a built-in gpt-image route. It is absent for Gemini, DashScope/Qwen, Ark/Seedream, Meta Muse Image, non-gpt-image routes, and custom providers unless their model explicitly declares `capabilities.qualityValues` on an adapter that forwards quality. If you don't see `quality`, do not try to force it.
 - `filename` — output filename prefix (no extension). Reusing a name does not overwrite an earlier file — a sibling `-v2` is written instead.
 - `outputDir` — override the configured output dir for this call.
 

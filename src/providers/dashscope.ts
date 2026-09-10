@@ -91,19 +91,7 @@ export const dashscopeAdapter: ImageProviderAdapter = {
       await throwHttpError(res, provider);
     }
     const text = await readBodyText(res, provider);
-    let json: {
-      output?: {
-        choices?: Array<{
-          message?: {
-            content?: Array<{
-              image?: string;
-              image_url?: string | { url?: string };
-              text?: string;
-            }>;
-          };
-        }>;
-      };
-    };
+    let json: unknown;
     try {
       json = JSON.parse(text);
     } catch {
@@ -111,11 +99,29 @@ export const dashscopeAdapter: ImageProviderAdapter = {
       const detail = `${provider.name} returned invalid JSON.`;
       throw new ImageGenError(detail, `${providerLogLabel(provider)} returned invalid JSON`);
     }
+    if (!isRecord(json)) throw invalidResponseError(provider);
+    const output = json.output;
+    if (output !== undefined && !isRecord(output)) throw invalidResponseError(provider);
+    const choices = isRecord(output) ? output.choices : undefined;
+    if (choices !== undefined && !Array.isArray(choices)) throw invalidResponseError(provider);
     const out: RawImageResult[] = [];
-    for (const choice of json.output?.choices ?? []) {
-      for (const part of choice.message?.content ?? []) {
+    for (const choice of choices ?? []) {
+      if (!isRecord(choice)) throw invalidResponseError(provider);
+      const message = choice.message;
+      if (message !== undefined && !isRecord(message)) throw invalidResponseError(provider);
+      const content = isRecord(message) ? message.content : undefined;
+      if (content !== undefined && !Array.isArray(content)) throw invalidResponseError(provider);
+      for (const part of content ?? []) {
+        if (!isRecord(part)) throw invalidResponseError(provider);
+        const imageUrl = part.image_url;
         const candidate =
-          typeof part.image_url === 'string' ? part.image_url : (part.image_url?.url ?? part.image);
+          typeof imageUrl === 'string'
+            ? imageUrl
+            : isRecord(imageUrl) && typeof imageUrl.url === 'string'
+              ? imageUrl.url
+              : typeof part.image === 'string'
+                ? part.image
+                : undefined;
         const classified = classifyImageOutput(candidate);
         if (classified) {
           if (out.length >= MAX_GENERATED_IMAGES) {
@@ -136,3 +142,14 @@ export const dashscopeAdapter: ImageProviderAdapter = {
     return out;
   },
 };
+
+function invalidResponseError(provider: ResolvedProvider): ImageGenError {
+  return new ImageGenError(
+    `${provider.name} returned an invalid image response.`,
+    `${providerLogLabel(provider)} returned an invalid image response`,
+  );
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}

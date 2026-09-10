@@ -90,16 +90,7 @@ export const geminiAdapter: ImageProviderAdapter = {
       await throwHttpError(res, provider);
     }
     const text = await readBodyText(res, provider);
-    let json: {
-      candidates?: Array<{
-        content?: {
-          parts?: Array<{
-            inlineData?: { mimeType?: string; data?: string };
-            inline_data?: { mime_type?: string; data?: string };
-          }>;
-        };
-      }>;
-    };
+    let json: unknown;
     try {
       json = JSON.parse(text);
     } catch {
@@ -108,16 +99,29 @@ export const geminiAdapter: ImageProviderAdapter = {
       throw new ImageGenError(detail, `${providerLogLabel(provider)} returned invalid JSON`);
     }
 
+    if (!isRecord(json) || (json.candidates !== undefined && !Array.isArray(json.candidates))) {
+      throw invalidResponseError(provider);
+    }
     const out: RawImageResult[] = [];
     for (const candidate of json.candidates ?? []) {
-      for (const part of candidate.content?.parts ?? []) {
+      if (!isRecord(candidate)) throw invalidResponseError(provider);
+      const content = candidate.content;
+      if (content !== undefined && !isRecord(content)) throw invalidResponseError(provider);
+      const parts = isRecord(content) ? content.parts : undefined;
+      if (parts !== undefined && !Array.isArray(parts)) throw invalidResponseError(provider);
+      for (const part of parts ?? []) {
+        if (!isRecord(part)) throw invalidResponseError(provider);
         // Google's REST API returns camelCase `inlineData`; the gRPC/proto form
         // is `inline_data`. Accept both — different gateways may pass either.
-        const inline = part.inlineData ?? part.inline_data;
-        const data = inline?.data;
+        const inline = isRecord(part.inlineData)
+          ? part.inlineData
+          : isRecord(part.inline_data)
+            ? part.inline_data
+            : undefined;
+        const data = typeof inline?.data === 'string' ? inline.data : undefined;
         const mimeType =
-          (inline as { mimeType?: string; mime_type?: string } | undefined)?.mimeType ??
-          (inline as { mimeType?: string; mime_type?: string } | undefined)?.mime_type ??
+          (typeof inline?.mimeType === 'string' ? inline.mimeType : undefined) ??
+          (typeof inline?.mime_type === 'string' ? inline.mime_type : undefined) ??
           'image/png';
         if (data) {
           if (out.length >= MAX_GENERATED_IMAGES) {
@@ -143,3 +147,14 @@ export const geminiAdapter: ImageProviderAdapter = {
     return out;
   },
 };
+
+function invalidResponseError(provider: ResolvedProvider): ImageGenError {
+  return new ImageGenError(
+    `${provider.name} returned an invalid image response.`,
+    `${providerLogLabel(provider)} returned an invalid image response`,
+  );
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}

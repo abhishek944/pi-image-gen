@@ -1,8 +1,26 @@
-export type ApiStyle = 'openai' | 'gemini' | 'dashscope' | 'openrouter' | 'ark' | 'codex';
+export type ApiStyle =
+  | 'openai'
+  | 'gemini'
+  | 'dashscope'
+  | 'openrouter'
+  | 'ark'
+  | 'meta'
+  | 'codex';
 export type CustomApiStyle = Exclude<ApiStyle, 'codex'>;
 
 /** Built-in provider id. Currently 1:1 with ApiStyle. */
 export type BuiltInProviderId = ApiStyle;
+
+/** User-facing provider route. Authentication paths are intentionally distinct. */
+export type BuiltInProviderRouteId =
+  | 'openai-api'
+  | 'codex-subscription'
+  | 'gemini-api'
+  | 'dashscope-api'
+  | 'openrouter-api'
+  | 'ark-api'
+  | 'meta-subscription'
+  | 'meta-api';
 
 /** A user-defined image-generation provider. */
 export type CustomImageProvider = {
@@ -55,6 +73,8 @@ export type BuiltInProviderOverride = {
 };
 
 export type ImageGenSettings = {
+  /** Authentication-specific provider route selected for the default model. */
+  defaultProvider?: string;
   /** Default model id when the tool call does not pass `model`. */
   defaultModel?: string;
   /**
@@ -137,6 +157,8 @@ export type ResolvedProvider = {
   baseUrl: string;
   apiKey?: string;
   headers?: Record<string, string>;
+  /** Authentication behavior selected by a user-facing provider route. */
+  authMode?: 'auto' | 'oauth' | 'api-key';
   /** Display label. */
   name: string;
   /** True for built-in providers (openai/gemini/dashscope/openrouter). */
@@ -157,6 +179,8 @@ export type ResolvedModel = {
    * skip capability validation.
    */
   capabilities?: ImageModelCapabilities;
+  /** True when a custom model explicitly declared its quality vocabulary. */
+  customQualityValues?: boolean;
 };
 
 /**
@@ -201,14 +225,20 @@ export type ImageModelCapabilities = {
    * model has no tier knob at all (gemini-2.5-flash-image is fixed at 1024px).
    */
   imageSizes?: string[];
+  /** Model-specific quality vocabulary when the provider exposes a quality knob. */
+  qualityValues?: string[];
   /** Max images per request via `n`. 1 = the model has no count knob; `n` is hidden. */
   nMax: number;
+  /** Whether nMax comes from provider docs or a conservative extension ceiling. */
+  nMaxSource?: 'provider' | 'extension';
   /** Max reference images per request. */
   maxReferenceImages: number;
   /** Accepted reference-image formats as display labels (e.g. "PNG", "JPEG"). */
   inputFormats: string[];
   /** Per-reference-image byte ceiling. */
   inputMaxBytes: number;
+  /** Whether reference count/format/byte values come from provider docs or local safety limits. */
+  referenceLimitsSource?: 'provider' | 'extension';
   /**
    * Documented advisory for reference-image dimensions (e.g. "both dimensions
    * between 384 and 2048 px"). Surfaced in the `image` param description only —
@@ -233,6 +263,10 @@ export type ImageProviderAdapter = {
 /** Narrow Pi model-registry contract used to resolve subscription OAuth. */
 export type ImageModelRegistry = {
   getAvailable(): Array<{ id: string; provider: string; baseUrl?: string }>;
+  /** Resolve the active provider credential, including OAuth refresh when configured. */
+  getApiKeyForProvider?(provider: string): Promise<string | undefined>;
+  /** Report whether a concrete provider model is currently backed by OAuth. */
+  isUsingOAuth?(model: { id: string; provider: string; baseUrl?: string }): boolean;
   getApiKeyAndHeaders(model: {
     id: string;
     provider: string;

@@ -4,29 +4,31 @@ Pi extension that adds an `image_generate` tool. Supported providers:
 
 | Provider                       | Model id (alias)                              | Authentication        |
 | ------------------------------ | --------------------------------------------- | --------------------- |
-| ChatGPT Codex                  | `gpt-image-2-codex` (aliases `codex`, `openai-codex`) | Pi `/login` → ChatGPT Plus/Pro (Codex) |
-| OpenAI                         | `gpt-image-2`                                 | `OPENAI_API_KEY`      |
+| ChatGPT Codex                  | `gpt-image-2` on route `codex-subscription` (`gpt-image-2-codex`, `codex`, and `openai-codex` remain legacy aliases) | Pi `/login` → ChatGPT Plus/Pro (Codex) |
+| OpenAI                         | `gpt-image-2`, `gpt-image-2.5-flare`, `gpt-image-2.5-sunburst` | `OPENAI_API_KEY`      |
 | Google Gemini ("Nano Banana")  | `gemini-3-pro-image` (alias `nano-banana-pro`), `gemini-3.1-flash-image` (alias `nano-banana-2`), `gemini-3.1-flash-lite-image` (alias `nano-banana-2-lite`), `gemini-2.5-flash-image` (alias `nano-banana`) | `GEMINI_API_KEY` |
 | Alibaba DashScope (Qwen-Image) | `qwen-image-3.0-pro`, `qwen-image-3.0`, `qwen-image-2.0-pro`, `qwen-image-2.0` | `DASHSCOPE_API_KEY`   |
 | Volcengine Ark (ByteDance Seedream) | `doubao-seedream-5-0-pro-260628` (alias `seedream-5-pro`, retired id `doubao-seedream-5-0-pro-260128` still resolves), `doubao-seedream-5-0-260128` (aliases `seedream-5`, `seedream`; the same model also answers to `doubao-seedream-5-0-lite-260128` / `seedream-5-lite`), `doubao-seedream-4-5-251128` (alias `seedream-4-5`), `doubao-seedream-4-0-250828` (alias `seedream-4`) | `ARK_API_KEY`         |
+| Meta Model API (Muse Image) | `muse-image-1.0` (aliases `muse-image`, `meta-muse`) | Pi `/login meta` via `pi-meta-oauth`, or `META_API_KEY` |
 | OpenRouter                     | any (use `openrouter/<vendor>/<id>`)          | `OPENROUTER_API_KEY`  |
 | Custom providers               | whatever you declare in settings              | (your choice, via `$VAR`) |
 
 Upstream API docs (handy when debugging gateway behavior or adding new models):
 
-- OpenAI gpt-image-2 — [developers.openai.com/api/docs/models/gpt-image-2](https://developers.openai.com/api/docs/models/gpt-image-2)
+- OpenAI GPT Image — [generation guide](https://developers.openai.com/api/docs/guides/image-generation), [gpt-image-2](https://developers.openai.com/api/docs/models/gpt-image-2), [2.5 Flare](https://developers.openai.com/api/docs/models/gpt-image-2.5-flare), [2.5 Sunburst](https://developers.openai.com/api/docs/models/gpt-image-2.5-sunburst)
 - Google Gemini image generation — [ai.google.dev/gemini-api/docs/image-generation](https://ai.google.dev/gemini-api/docs/image-generation)
 - Alibaba Qwen-Image 3.0 (generation & editing) — [help.aliyun.com/zh/model-studio/qwen-image-generation-and-editing-api-reference](https://help.aliyun.com/zh/model-studio/qwen-image-generation-and-editing-api-reference)
 - Alibaba DashScope Qwen-Image 2.0 (text-to-image) — [help.aliyun.com/zh/model-studio/qwen-image-api](https://help.aliyun.com/zh/model-studio/qwen-image-api)
 - Alibaba DashScope Qwen-Image-Edit — [help.aliyun.com/zh/model-studio/qwen-image-edit-api](https://help.aliyun.com/zh/model-studio/qwen-image-edit-api)
 - Volcengine Ark Seedream — [volcengine.com/docs/82379/1824121](https://www.volcengine.com/docs/82379/1824121)
+- Meta Muse Image cookbook — [github.com/meta-models/meta-model-cookbook/tree/main/05_muse_image](https://github.com/meta-models/meta-model-cookbook/tree/main/05_muse_image)
 - OpenRouter image API — [openrouter.ai/docs/api/api-reference/images/create-images](https://openrouter.ai/docs/api/api-reference/images/create-images)
 
-The env-var names match [pi.dev's provider table](https://pi.dev/docs/latest/providers) — if the agent already has a key set for a provider, this extension will reuse it. You don't need to introduce a new variable.
+Built-in API-key routes read the environment variables shown above (or `providers.<id>.apiKey` in `settings.json`); they do not read keys saved by Pi's general `/login` flow. Subscription routes are separate: Meta can use a Pi credential created by the [`pi-meta-oauth`](https://github.com/BlockedPath/pi-meta-oauth) package, while Codex uses Pi's ChatGPT Plus/Pro login. Meta API billing also accepts `META_API_KEY`; legacy `MODEL_API_KEY` remains accepted.
 
-For subscription-backed generation, first run `/login` in Pi and select **ChatGPT Plus/Pro (Codex)**, then configure `"defaultModel": "codex"`. No `OPENAI_API_KEY` is required. Codex requests use the ChatGPT-backed image endpoints and count against provider-managed subscription usage and limits.
+For subscription-backed generation, first run `/login` in Pi and select **ChatGPT Plus/Pro (Codex)**, then run `/image-gen use codex-subscription gpt-image-2`. No `OPENAI_API_KEY` is required. Codex requests use the ChatGPT-backed image endpoints and count against provider-managed subscription usage and limits. GPT Image 2.5 is intentionally **not** listed on this route: its API model ids have not been verified against the private Codex subscription endpoint.
 
-The active model is **fixed in settings.json**. The `image_generate` tool intentionally does **not** take a `model` parameter — point your project at one model, get consistent output. To switch models, edit settings and run `/image-gen reload`.
+The active provider route and model are **fixed in settings.json**. The `image_generate` tool intentionally does **not** take a `model` parameter — point your project at one route/model pair for consistent output. Use `/image-gen use <provider> <model>` to switch both safely; the command persists trusted project settings and refreshes the tool schema immediately.
 
 ## Install
 
@@ -39,7 +41,7 @@ pi install npm:@abhishek944/pi-image-gen
 Or directly from GitHub:
 
 ```sh
-pi install git:github.com/abhishek944/pi-image-gen@v0.1.1
+pi install git:github.com/abhishek944/pi-image-gen@v0.2.0
 ```
 
 The package's `pi.extensions` field auto-registers it with the host pi-coding-agent runtime; no extra wiring needed.
@@ -54,15 +56,22 @@ Settings are read by `pi-shared`'s `loadPiSettings`, which merges three files (l
 
 Project settings are ignored when project trust is declined. `${ENV_VAR}` interpolation is supported in global and agent settings only, so keep environment-backed credentials out of project settings.
 
-All settings live under the `pi-image-gen` key. The minimum viable config sets `defaultModel`:
+All settings live under the `pi-image-gen` key. New configurations should set an authentication-specific `defaultProvider` together with `defaultModel` (the command below writes this for you):
+
+```text
+/image-gen use gemini-api nano-banana
+```
 
 ```json
 {
   "pi-image-gen": {
+    "defaultProvider": "gemini-api",
     "defaultModel": "nano-banana"
   }
 }
 ```
+
+Model-only configurations remain supported and keep the earlier automatic routing behavior.
 
 …and exports the matching env var:
 
@@ -77,6 +86,7 @@ That's it. From the agent: `image_generate({ prompt: "a cyberpunk cat" })`.
 ```json
 {
   "pi-image-gen": {
+    "defaultProvider": "gemini-api",
     "defaultModel": "nano-banana",
     "outputDir": ".pi/images",
 
@@ -85,6 +95,7 @@ That's it. From the agent: `image_generate({ prompt: "a cyberpunk cat" })`.
       "gemini":     { "headers": { "x-goog-trace": "pi-prod" } },
       "dashscope":  { "baseUrl": "https://dashscope-intl.aliyuncs.com/api/v1" },
       "ark":        { "apiKey": "$ARK_API_KEY" },
+      "meta":       { "apiKey": "$META_API_KEY" },
       "openrouter": { "apiKey": "$OPENROUTER_API_KEY" }
     },
 
@@ -106,10 +117,11 @@ That's it. From the agent: `image_generate({ prompt: "a cyberpunk cat" })`.
 
 | Field             | Purpose                                                                                  |
 | ----------------- | ---------------------------------------------------------------------------------------- |
+| `defaultProvider` | Authentication-specific route (`openai-api`, `codex-subscription`, `gemini-api`, `dashscope-api`, `openrouter-api`, `ark-api`, `meta-api`, `meta-subscription`, or a custom-provider id). Recommended for new configs. |
 | `defaultModel`    | Model id or alias the tool will use. **Required.**                                       |
 | `outputDir`       | Where to write generated images. Relative paths resolve against the session cwd. Default `.pi/images`. |
 | `providers`       | Per-built-in-provider override. Set `apiKey`, `baseUrl`, or `headers` to point at a proxy or non-standard env var. |
-| `customProviders` | User-defined providers — see below.                                                      |
+| `customProviders` | User-defined providers — see below. Built-in route ids such as `openai-api` and `meta-subscription` are reserved and cannot be shadowed. |
 
 In global and agent settings, `apiKey`, `baseUrl`, and `headers` values support `$VAR` and `${VAR}` environment interpolation. Fallbacks require the braced form (for example, `${FOO:-default}`); `$FOO:-default` is not supported. Project settings keep all of these placeholders literal.
 
@@ -124,15 +136,17 @@ Follow the selected host's documentation for installation and current compatibil
 
 ## Built-in setup walkthrough
 
-### 1. OpenAI (`gpt-image-2`)
+### 1. OpenAI (`gpt-image-2` and GPT Image 2.5)
 
 ```sh
 export OPENAI_API_KEY=sk-...
 ```
 
 ```json
-{ "pi-image-gen": { "defaultModel": "gpt-image-2" } }
+{ "pi-image-gen": { "defaultProvider": "openai-api", "defaultModel": "gpt-image-2.5-flare" } }
 ```
+
+Choose `gpt-image-2.5-flare` for fast everyday generation or `gpt-image-2.5-sunburst` when editing precision matters most. Both expose `low`, `medium`, `high`, `xhigh`, `max`, and `auto` quality. Their `-2026-09-08` snapshots are also built in. The older `gpt-image-2` remains available.
 
 ### 2. Google Gemini "Nano Banana"
 
@@ -192,7 +206,42 @@ The default base URL is `https://ark.cn-beijing.volces.com/api/v3`. To use a dif
 }
 ```
 
-### 5. OpenRouter (one key, many models)
+### 5. Meta Muse Image
+
+Meta works with either subscription login or an API key.
+
+**Subscription login:** install [`pi-meta-oauth`](https://github.com/BlockedPath/pi-meta-oauth), then authenticate in Pi. Check that package's current Pi peer-version range first; OAuth support is optional, and `META_API_KEY` remains available on Pi versions outside it.
+
+```sh
+pi install npm:pi-meta-oauth
+```
+
+```text
+/login meta
+```
+
+**API key:** create a key in the [Meta Model API dashboard](https://dev.meta.ai/), then configure:
+
+```sh
+export META_API_KEY=...
+```
+
+Legacy `MODEL_API_KEY` is also accepted. Select the funding route explicitly:
+
+```text
+/image-gen use meta-subscription muse-image
+/image-gen use meta-api muse-image
+```
+
+```json
+{ "pi-image-gen": { "defaultProvider": "meta-subscription", "defaultModel": "muse-image" } }
+```
+
+With a legacy model-only configuration, an active Meta login still takes precedence and an API key remains the fallback. With an explicit route, `meta-subscription` uses only Pi OAuth and `meta-api` uses only the configured API key.
+
+OAuth credentials are resolved and refreshed through Pi at request time. They are used only for the built-in Meta provider at `api.meta.ai`, never for custom providers or overridden endpoints. Muse Image uses Meta's conversational Responses API. This extension sends `store: false`, so calls do not retain server-side conversation state. Generate from text normally; for editing or composition, pass one or more images through the tool's `image` array. Official cookbook size examples include `1024x1024`, `1536x1024`, and `1024x1536`; these are guidance rather than an exhaustive enum, and Meta validates the requested value. Muse Image produces one output per request, so `n` and `quality` are hidden.
+
+### 6. OpenRouter (one key, many models)
 
 ```sh
 export OPENROUTER_API_KEY=...
@@ -214,7 +263,7 @@ Each custom provider declares:
 
 | Field      | Required | Notes                                                                                |
 | ---------- | -------- | ------------------------------------------------------------------------------------ |
-| `api` | yes      | One of `openai`, `gemini`, `dashscope`, `openrouter`, `ark`. Picks the image-API wire shape. |
+| `api` | yes      | One of `openai`, `gemini`, `dashscope`, `openrouter`, `ark`, `meta`. Picks the image-API wire shape. |
 | `baseUrl`  | yes      | API endpoint URL. `$VAR` syntax supported.                                           |
 | `apiKey`   | usually  | API key string. `$VAR` syntax supported.                                             |
 | `name`     | no       | Display name shown in `/image-gen list`.                                             |
@@ -242,7 +291,7 @@ A custom model whose `id` names a built-in model **inherits that model's capabil
 }
 ```
 
-> Note: pi.dev custom providers also have an `api` field, but its values (`openai-completions`, `anthropic-messages`, …) are LLM streaming formats that don't apply to image generation. The values here (`openai`, `gemini`, `dashscope`, `openrouter`, `ark`) are image-API wire shapes — same field name, different namespace.
+> Note: pi.dev custom providers also have an `api` field, but its values (`openai-completions`, `anthropic-messages`, …) are LLM streaming formats that don't apply to image generation. The values here (`openai`, `gemini`, `dashscope`, `openrouter`, `ark`, `meta`) are image-API wire shapes — same field name, different namespace.
 
 ### Example: self-hosted Stable Diffusion (OpenAI-compatible)
 
@@ -331,7 +380,7 @@ image_generate({
   size?: string,                   // per-model form (see below); hidden for Gemini models
   aspectRatio?: string,            // Gemini models only — enum from the model's vocabulary
   imageSize?: string,              // Gemini models only — tier enum ("1K"/"2K"/"4K"), when the model has tiers
-  quality?: 'low'|'medium'|'high'|'auto', // present only for a built-in gpt-image route (see below)
+  quality?: 'low'|'medium'|'high'|'xhigh'|'max'|'auto', // exact enum is model-specific
   filename?: string,               // filename prefix (no extension)
   outputDir?: string,              // override settings.outputDir for this call
 })
@@ -339,20 +388,22 @@ image_generate({
 
 Returns the absolute file path(s) of saved images. Files land in `outputDir` (default `<cwd>/.pi/images`), filename pattern `<filename or model-UTC-stamp>.<ext>`.
 
-**The schema is model-aware.** Every built-in model carries a capability contract sourced from the official API docs, and the tool is registered with parameters shaped by that contract (on session start, and again after `/image-gen reload`) — so the agent sees exactly the knobs the active model honors, with the documented values in enums and descriptions. The contract is **advice, not a gate**: numeric limits (size ranges, `n` ceilings, reference-image counts and byte ceilings) are stated in the descriptions but never hard-enforced client-side — a self-hosted deployment or gateway may legitimately diverge from the cloud platform's documented limits, and the provider's own error is the backstop. The only client-side rejections are parameter combinations the adapters would silently drop (a pixel `size` sent to a Gemini model, or `aspectRatio` sent to a pixel-size model — the provider never sees those, so it can't complain).
+**The schema is model-aware.** Every built-in model carries a capability contract sourced from official API docs or clearly labeled extension safety limits, and the tool is registered with parameters shaped by that contract (on session start, and again after `/image-gen reload`) — so the agent sees exactly the knobs the active model honors, with documented values in enums and descriptions where available. Provider-specific numeric contracts (size ranges, `n` ceilings, and reference-image counts) are generally **advice, not a gate** because a self-hosted deployment or gateway may legitimately differ. Independently, the extension enforces universal safety ceilings of 16 references, 20MB per input, and 128MB combined, plus rejects parameter combinations an adapter would otherwise silently drop. Providers may enforce stricter limits.
 
 - `size` follows the model's documented form:
   - **Qwen** (`qwen-image-*`): `"<width>*<height>"` (asterisk, e.g. `"2048*2048"`), total pixels 512²–2048²; 3.0 models additionally cap aspect ratio at 1:8–8:1. The x-form is normalized automatically as a safety net.
   - **Seedream** (`doubao-seedream-*`): a tier token from the model's list (`1K`/`1.5K`/`2K`/`3K`/`4K`) **or** an explicit `"<w>x<h>"` within the model's pixel window (2K floor on 5.0/4.5).
   - **gpt-image-2**: `"auto"` or `"<w>x<h>"` — arbitrary sizes allowed (both edges divisible by 16, ratio ≤ 3:1, 655,360–8,294,400 px, longest edge ≤ 3840), beyond the standard `1024x1024`/`1536x1024`/`1024x1536`.
+  - **GPT Image 2.5 Flare/Sunburst**: the same arbitrary `"<w>x<h>"` range as GPT Image 2 (multiples of 16, ratio 1:3–3:1, 655,360–8,294,400 px, longest edge ≤ 3840), plus `"auto"`. The standard recommended sizes remain `1024x1024`, `1536x1024`, and `1024x1536`; resolutions above `2560x1440` are experimental.
+  - **Meta Muse Image**: passed through the Responses API's `image_generation` tool; official cookbook examples include `1024x1024`, `1536x1024`, and `1024x1536`, but the field remains free-form for provider validation.
   - Omit `size` to use the model's own default (qwen-image-3.0 auto-picks from the prompt).
 - `aspectRatio` / `imageSize` replace `size` for **Gemini** models (they have no pixel-size knob): `aspectRatio` is an enum from the model's vocabulary (10–14 values), `imageSize` an enum of the model's tiers (`1K`/`2K`/`4K`; hidden when the model is fixed at one tier, as `gemini-3.1-flash-lite-image` and `gemini-2.5-flash-image` are).
-- `n` carries the model's documented ceiling in its description (qwen 6, gpt-image-2 10) and is **hidden for Seedream** — that API has no count parameter, so `n` would be silently dropped.
-- `image` spells out the active model's documented reference-image contract in its description (formats, max count, per-image byte ceiling, dimension advice): qwen documents ≤ 3 images (JPG/JPEG/PNG/BMP/TIFF/WEBP/GIF, ≤ 10MB each), Seedream ≤ 10–14 (incl. HEIC/HEIF, ≤ 30MB), gpt-image-2 ≤ 16 (png/webp/jpg, ≤ 50MB), Gemini ≤ 3–14 (≤ 20MB). These are descriptions of the cloud platform's limits, not client-side gates — the provider enforces its own rules.
-- `quality` appears **only** for a **built-in gpt-image** route — the built-in OpenAI provider on `gpt-image-*`, or an OpenRouter route whose model id is gpt-image (e.g. `openrouter/openai/gpt-image-2`). Only there is it constrained to the enum `low`/`medium`/`high`/`auto` (the vocabulary those APIs document). It is **omitted from the schema entirely** for:
-  - Gemini, DashScope/Qwen, and Ark/Seedream — their image APIs have no `quality` field (Seedream varies quality by `size` resolution tier instead);
+- `n` is model-specific and carries the model's documented ceiling in its description (Qwen 6, GPT Image 2/2.5 10). The extension enforces a universal maximum of 10 outputs per call. It is **hidden for Seedream and Meta Muse Image** — those APIs expose no count knob here, and direct callers are rejected if they request more than one output.
+- `image` spells out the active model's documented reference-image contract in its description (formats, max count, per-image byte ceiling, dimension advice): qwen documents ≤ 3 images (JPG/JPEG/PNG/BMP/TIFF/WEBP/GIF, ≤ 10MB each), Seedream ≤ 10–14 (incl. HEIC/HEIF, ≤ 30MB), gpt-image-2 ≤ 16 (png/webp/jpg, ≤ 50MB), Gemini ≤ 3–14 (≤ 20MB), Meta Muse Image labels the extension's own recognized formats (PNG/JPEG/GIF/WEBP/BMP/TIFF/HEIC/HEIF) because the cookbook does not publish an exhaustive input contract. Provider-documented contracts remain advisory; the extension-wide 16-reference, 20MB-per-input, and 128MB-combined safety ceilings are enforced locally, and providers may enforce stricter rules.
+- `quality` appears **only** for a **built-in gpt-image** route — the built-in OpenAI provider on `gpt-image-*`, or an OpenRouter route whose model id is gpt-image (e.g. `openrouter/openai/gpt-image-2`). GPT Image 2 and the verified Codex route use `low`/`medium`/`high`/`auto`; GPT Image 2.5 Flare and Sunburst additionally expose `xhigh` and `max`. It is **omitted from the schema entirely** for:
+  - Gemini, DashScope/Qwen, Ark/Seedream, and Meta Muse Image — their image APIs have no `quality` field (Seedream varies quality by `size` resolution tier instead);
   - **non-gpt-image routes** on the OpenAI/OpenRouter wire — e.g. built-in `openai/dall-e-3` (which uses `standard`/`hd`) or an OpenRouter route to a non-OpenAI model like Seedream — because the enum above is gpt-image's vocabulary, not the wire format's; and
-  - **any custom provider**, including OpenAI-*compatible* ones — a self-hosted or third-party model may use a different quality vocabulary (e.g. DALL·E 3's `standard`/`hd`) or none at all, so the OpenAI wire format alone does **not** imply the four values above. Passing an unsupported value would only surface as a provider-side 400.
+  - custom providers by default, including OpenAI-*compatible* ones — wire format alone does **not** imply a quality vocabulary. A custom model may opt in by explicitly declaring `capabilities.qualityValues`; this is honored only for the custom OpenAI/OpenRouter adapters that forward `quality`.
 
   If `defaultModel` is unset or misconfigured, `quality` stays present (the tool remains fully featured and `execute` surfaces a friendly config error). Use `"low"` for fast drafts and a higher level for final assets or dense text.
 
@@ -405,17 +456,21 @@ Provider behavior:
 | OpenAI (`gpt-image-2`) | `POST /v1/images/edits` (multipart). Supports multi-image. |
 | Gemini (`gemini-3-pro-image`, `gemini-3.1-flash-image`, `gemini-3.1-flash-lite-image`, `gemini-2.5-flash-image`) | `inline_data` parts prepended to the user message. Supports multi-image. |
 | DashScope (`qwen-image-3.0-pro`, `qwen-image-3.0`, `qwen-image-2.0-pro`, `qwen-image-2.0`) | `image` parts in `messages[].content`. Up to 3 images. |
+| Meta Muse Image (`muse-image-1.0`) | `POST /v1/responses` with `input_image` content parts. Supports multi-image composition. |
 | OpenRouter | `POST /api/v1/images` with `input_references` JSON. Supports multi-image. |
 
-There is intentionally no `model` parameter on the tool — the active model is fixed by `pi-image-gen.defaultModel` in settings.
+There is intentionally no `model` parameter on the tool — the active route/model pair is fixed by `pi-image-gen.defaultProvider` and `pi-image-gen.defaultModel` in settings.
 
 ## Slash commands
 
-- `/image-gen list` — show the active model, which provider it routes to, whether the key is set, configured providers, and the catalog of built-in model ids.
+- `/image-gen list` — show output directory, default provider, default model, routes currently configured through API keys/Pi logins/custom settings, and every available provider/model route. OpenAI API vs Codex subscription and Meta API vs Meta subscription are separate entries. Listing login status never refreshes or retrieves an OAuth token.
+- `/image-gen set provider <provider>` — persist only the default provider route. If the existing model is incompatible, the command warns so you can set the model next.
+- `/image-gen set model <model>` — persist the model after validating it against the selected provider.
+- `/image-gen use <provider> <model>` — validate and persist both atomically. This is the recommended switch command.
 - `/image-gen reload` — re-read settings from disk and re-register the tool so its schema (e.g. whether `quality` is exposed) tracks the newly selected model.
 - `/image-gen generate <prompt>` — generate an image directly from the command line using the active model. Reports the saved file path(s) as a plain-text notification (the command uses `ctx.ui.notify`, which shows a status line, not rendered Markdown — so unlike the tool result it does not emit an inline `![](…)` image). Use the `image_generate` tool from the agent when you want the image rendered inline.
 
-Use `/image-gen list` to verify your config — it will tell you when `defaultModel` is unset, points at a provider with no API key, or names an unknown id.
+The three settings commands update `<cwd>/.pi/settings.json` only for a trusted project. They merge the `pi-image-gen` object without replacing unrelated settings and immediately re-register the tool; manual edits still require `/image-gen reload`.
 
 ## Bundled skill
 

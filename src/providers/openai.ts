@@ -151,15 +151,16 @@ export async function parseImagesResponse(
     const detail = `${provider.name} returned ${contentType || 'non-JSON'} from ${redactUrl(url)}. The endpoint probably doesn't expose the OpenAI-compatible images API at this path.`;
     throw new ImageGenError(detail, `${providerLogLabel(provider)} returned non-JSON`);
   }
-  let json: {
-    data?: Array<{ url?: string; b64_json?: string; revised_prompt?: string; media_type?: string }>;
-  };
+  let json: unknown;
   try {
     json = JSON.parse(text);
   } catch {
     // The parse error message echoes response bytes, so it's dropped entirely.
     const detail = `${provider.name} returned invalid JSON.`;
     throw new ImageGenError(detail, `${providerLogLabel(provider)} returned invalid JSON`);
+  }
+  if (!isRecord(json) || (json.data !== undefined && !Array.isArray(json.data))) {
+    throw invalidResponseError(provider);
   }
   const data = json.data ?? [];
   if (data.length > MAX_GENERATED_IMAGES) {
@@ -170,11 +171,12 @@ export async function parseImagesResponse(
   }
   const out: RawImageResult[] = [];
   for (const entry of data) {
+    if (!isRecord(entry)) throw invalidResponseError(provider);
     // Prefer explicit b64_json field (OpenAI shape). If absent, classify the
     // `url` field — some gateways return a `data:` URI or even raw base64
     // there instead of a real URL.
     let payload: RawImageResult['data'] | null = null;
-    if (entry.b64_json) {
+    if (typeof entry.b64_json === 'string' && entry.b64_json) {
       if (entry.b64_json.length > MAX_BASE64_IMAGE_CHARS) {
         throw new ImageGenError(
           'Provider returned an image that exceeds the size ceiling.',
@@ -182,15 +184,20 @@ export async function parseImagesResponse(
         );
       }
       const prefix = Buffer.from(entry.b64_json.slice(0, 24), 'base64');
-      const mimeType = sniffMime(prefix) ?? entry.media_type ?? 'image/png';
+      const mimeType =
+        sniffMime(prefix) ??
+        (typeof entry.media_type === 'string' ? entry.media_type : undefined) ??
+        'image/png';
       payload = { kind: 'base64', bytes: entry.b64_json, mimeType };
     } else {
-      const classified = classifyImageOutput(entry.url);
+      const classified = classifyImageOutput(
+        typeof entry.url === 'string' ? entry.url : undefined,
+      );
       if (classified) payload = classified;
     }
     if (!payload) continue;
     const item: RawImageResult = { data: payload };
-    if (entry.revised_prompt) item.revisedPrompt = entry.revised_prompt;
+    if (typeof entry.revised_prompt === 'string') item.revisedPrompt = entry.revised_prompt;
     out.push(item);
   }
   if (out.length === 0) {
@@ -199,4 +206,15 @@ export async function parseImagesResponse(
     throw new ImageGenError(detail, `${providerLogLabel(provider)} returned no usable images`);
   }
   return out;
+}
+
+function invalidResponseError(provider: ResolvedProvider): ImageGenError {
+  return new ImageGenError(
+    `${provider.name} returned an invalid image response.`,
+    `${providerLogLabel(provider)} returned an invalid image response`,
+  );
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
 }

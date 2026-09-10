@@ -30,6 +30,8 @@ const FTYP_BRAND_MIME: Record<string, string> = {
 
 const DATA_URI_RE = /^data:(image\/[a-z+.-]+);base64,(.+)$/i;
 export const MAX_IMAGE_BYTES = 20 * 1024 * 1024;
+export const MAX_REFERENCE_IMAGE_INPUTS = 16;
+export const MAX_TOTAL_REFERENCE_IMAGE_BYTES = 128 * 1024 * 1024;
 export const MAX_BASE64_IMAGE_CHARS = Math.ceil(MAX_IMAGE_BYTES / 3) * 4;
 export const MAX_GENERATED_IMAGES = 10;
 
@@ -38,12 +40,26 @@ export async function resolveImageInputs(
   cwd: string,
   fetchImpl: (input: string | URL, init?: RequestInit) => Promise<Response>,
   signal?: AbortSignal,
+  aggregateByteCeiling = MAX_TOTAL_REFERENCE_IMAGE_BYTES,
 ): Promise<ResolvedImageInput[]> {
   if (!raw || raw.length === 0) return [];
+  if (raw.length > MAX_REFERENCE_IMAGE_INPUTS) {
+    throw new ImageGenError(
+      `Too many reference images (maximum ${MAX_REFERENCE_IMAGE_INPUTS}).`,
+      'reference image count exceeds safety ceiling',
+    );
+  }
   const out: ResolvedImageInput[] = [];
+  let totalBytes = 0;
   for (let index = 0; index < raw.length; index++) {
+    if (signal?.aborted) {
+      throw new ImageGenError('Image input loading was cancelled.', 'image input loading cancelled');
+    }
     const inputLabel = raw.length > 1 ? `Image input #${index + 1}` : 'Image input';
-    out.push(await resolveOne(raw[index]!, inputLabel, cwd, fetchImpl, signal));
+    const resolved = await resolveOne(raw[index]!, inputLabel, cwd, fetchImpl, signal);
+    totalBytes += resolved.bytes.byteLength;
+    assertReferenceImageAggregateBytes(totalBytes, aggregateByteCeiling);
+    out.push(resolved);
   }
   return out;
 }
@@ -181,7 +197,7 @@ async function resolveOne(
           `${logLabel} rejected (outside cwd)`,
         );
       }
-      bytes = await file.readFile();
+      bytes = await readBoundedFile(file);
     } finally {
       await file.close();
     }
@@ -203,6 +219,26 @@ async function resolveOne(
     );
   }
   return { bytes, mimeType };
+}
+
+async function readBoundedFile(
+  file: Awaited<ReturnType<typeof open>>,
+): Promise<Buffer> {
+  const buffer = Buffer.allocUnsafe(MAX_IMAGE_BYTES + 1);
+  let total = 0;
+  while (total < buffer.length) {
+    const { bytesRead } = await file.read(buffer, total, buffer.length - total, null);
+    if (bytesRead === 0) break;
+    total += bytesRead;
+  }
+  if (total > MAX_IMAGE_BYTES) {
+    throw new ImageGenError(
+      'Reference image exceeds the image size ceiling.',
+      'reference image rejected (too large)',
+    );
+  }
+  // Copy only the bytes read so tiny inputs do not retain the full 20MB guard buffer.
+  return Buffer.from(buffer.subarray(0, total));
 }
 
 export function sniffMime(bytes: Uint8Array): string | undefined {
@@ -255,6 +291,18 @@ function sniffFtypBrand(bytes: Uint8Array): string | undefined {
   }
   const brand = String.fromCharCode(bytes[8]!, bytes[9]!, bytes[10]!, bytes[11]!);
   return FTYP_BRAND_MIME[brand];
+}
+
+export function assertReferenceImageAggregateBytes(
+  totalBytes: number,
+  ceiling = MAX_TOTAL_REFERENCE_IMAGE_BYTES,
+): void {
+  if (totalBytes > ceiling) {
+    throw new ImageGenError(
+      'Reference images exceed the combined size ceiling.',
+      'reference images exceed aggregate safety ceiling',
+    );
+  }
 }
 
 export function toDataUri(input: ResolvedImageInput): string {
