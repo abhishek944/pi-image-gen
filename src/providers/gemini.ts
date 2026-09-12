@@ -15,6 +15,7 @@ import type {
   ResolvedProvider,
 } from '../types.js';
 import { withDefaultPath } from '../url.js';
+import { bearerHeaders, credentialRedirectMode, hasProviderAuthentication, setHeaderCaseInsensitive } from './openai.js';
 
 /**
  * Google Generative Language API for `gemini-2.5-flash-image` (Nano Banana)
@@ -32,16 +33,26 @@ export const geminiAdapter: ImageProviderAdapter = {
     signal?: AbortSignal,
     inputs?: ResolvedImageInput[],
   ): Promise<RawImageResult[]> {
-    if (!provider.apiKey) {
+    if (!hasProviderAuthentication(provider)) {
       throw missingKeyError(provider);
     }
     const base = withDefaultPath(provider.baseUrl, '/v1beta');
     const url = `${base}/models/${encodeURIComponent(remoteModelId)}:generateContent`;
-    const headers: Record<string, string> = {
-      'content-type': 'application/json',
-      'x-goog-api-key': provider.apiKey,
-    };
-    if (provider.headers) Object.assign(headers, provider.headers);
+    const usesLegacyGoogleAuth = provider.builtIn || provider.customAuth == null;
+    const headers: Record<string, string> = usesLegacyGoogleAuth
+      ? { ...(provider.headers ?? {}) }
+      : bearerHeaders(provider);
+    setHeaderCaseInsensitive(headers, 'content-type', 'application/json');
+    if (usesLegacyGoogleAuth && provider.apiKey) {
+      const configuredGoogleKey = Object.entries(provider.headers ?? {})
+        .filter(([name]) => name.toLowerCase() === 'x-goog-api-key')
+        .at(-1)?.[1];
+      setHeaderCaseInsensitive(
+        headers,
+        'x-goog-api-key',
+        configuredGoogleKey ?? provider.apiKey,
+      );
+    }
 
     const n = params.n ?? 1;
     // Per https://ai.google.dev/gemini-api/docs/image-generation REST examples,
@@ -80,6 +91,7 @@ export const geminiAdapter: ImageProviderAdapter = {
         headers,
         body: JSON.stringify(body),
         signal: signal ?? null,
+        redirect: credentialRedirectMode(provider),
       });
     } catch (error) {
       throw describeNetworkError(error, provider);
@@ -140,6 +152,16 @@ export const geminiAdapter: ImageProviderAdapter = {
         }
       }
     }
+    const requestId = typeof json.responseId === 'string'
+      ? json.responseId
+      : res.headers.get('x-request-id') ?? undefined;
+    const usage = numericRecord(json.usageMetadata);
+    if (out[0] && (requestId || usage)) {
+      out[0].metadata = {
+        ...(requestId ? { requestId } : {}),
+        ...(usage ? { usage } : {}),
+      };
+    }
     if (out.length === 0) {
       const detail = `${provider.name} returned no image data — the model may have refused to generate. Tell the user to rephrase the prompt or try a different model.`;
       throw new ImageGenError(detail, `${providerLogLabel(provider)} returned no image data`);
@@ -153,6 +175,14 @@ function invalidResponseError(provider: ResolvedProvider): ImageGenError {
     `${provider.name} returned an invalid image response.`,
     `${providerLogLabel(provider)} returned an invalid image response`,
   );
+}
+
+function numericRecord(value: unknown): Record<string, number> | undefined {
+  if (!isRecord(value)) return undefined;
+  const entries = Object.entries(value).filter(
+    (entry): entry is [string, number] => typeof entry[1] === 'number' && Number.isFinite(entry[1]),
+  );
+  return entries.length > 0 ? Object.fromEntries(entries) : undefined;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

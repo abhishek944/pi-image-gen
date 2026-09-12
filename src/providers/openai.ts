@@ -19,13 +19,56 @@ import type {
   RawImageResult,
   ResolvedImageInput,
   ResolvedProvider,
+  ImageProviderRuntime,
 } from '../types.js';
 import { withDefaultPath } from '../url.js';
 
+export function hasProviderAuthentication(provider: ResolvedProvider): boolean {
+  return provider.customAuth?.type === 'none' || Boolean(provider.apiKey);
+}
+
+export function credentialRedirectMode(provider: ResolvedProvider): 'error' | 'follow' {
+  return provider.customAuth?.type === 'header' ||
+      (provider.api === 'gemini' && (provider.builtIn || provider.customAuth == null)) ||
+      Object.keys(provider.headers ?? {}).length > 0
+    ? 'error'
+    : 'follow';
+}
+
+export function setHeaderCaseInsensitive(
+  headers: Record<string, string>,
+  name: string,
+  value: string,
+): void {
+  for (const existing of Object.keys(headers)) {
+    if (existing.toLowerCase() === name.toLowerCase()) delete headers[existing];
+  }
+  headers[name] = value;
+}
+
 export function bearerHeaders(provider: ResolvedProvider): Record<string, string> {
-  const headers: Record<string, string> = {};
-  if (provider.apiKey) headers.authorization = `Bearer ${provider.apiKey}`;
-  if (provider.headers) Object.assign(headers, provider.headers);
+  const headers: Record<string, string> = { ...(provider.headers ?? {}) };
+  if (provider.customAuth?.type === 'none') return headers;
+  if (provider.customAuth?.type === 'header') {
+    if (provider.apiKey) setHeaderCaseInsensitive(headers, provider.customAuth.header, provider.apiKey);
+    return headers;
+  }
+  if (provider.customAuth == null) {
+    const legacyAuthorization = Object.entries(headers)
+      .filter(([name]) => name.toLowerCase() === 'authorization')
+      .at(-1)?.[1];
+    if (legacyAuthorization != null) {
+      setHeaderCaseInsensitive(headers, 'authorization', legacyAuthorization);
+      return headers;
+    }
+  }
+  if (provider.apiKey) setHeaderCaseInsensitive(headers, 'authorization', `Bearer ${provider.apiKey}`);
+  return headers;
+}
+
+export function jsonHeaders(provider: ResolvedProvider): Record<string, string> {
+  const headers = bearerHeaders(provider);
+  setHeaderCaseInsensitive(headers, 'content-type', 'application/json');
   return headers;
 }
 
@@ -38,7 +81,7 @@ export function bearerHeaders(provider: ResolvedProvider): Record<string, string
  *   - POST /v1/images/edits        (image-to-image, multipart/form-data)
  *
  * The edit path is selected when the caller passes `inputs` (resolved
- * reference images). Mask is intentionally not exposed to keep scope small.
+ * reference images). Verified GPT Image routes may also attach a separate mask.
  *
  * OpenRouter is NOT OpenAI-compatible for images — it uses POST /api/v1/images
  * (no `/generations` suffix). See providers/openrouter.ts.
@@ -51,13 +94,14 @@ export const openaiAdapter: ImageProviderAdapter = {
     fetchImpl: typeof fetch,
     signal?: AbortSignal,
     inputs?: ResolvedImageInput[],
+    runtime?: ImageProviderRuntime,
   ): Promise<RawImageResult[]> {
-    if (!provider.apiKey) {
+    if (!hasProviderAuthentication(provider)) {
       throw missingKeyError(provider);
     }
     const base = withDefaultPath(provider.baseUrl, '/v1');
     if (inputs && inputs.length > 0) {
-      return generateWithImages(provider, base, remoteModelId, params, inputs, fetchImpl, signal);
+      return generateWithImages(provider, base, remoteModelId, params, inputs, fetchImpl, signal, runtime?.mask);
     }
     return generateFromText(provider, base, remoteModelId, params, fetchImpl, signal);
   },
@@ -67,7 +111,7 @@ async function generateFromText(
   provider: ResolvedProvider,
   base: string,
   remoteModelId: string,
-  params: { prompt: string; n?: number; size?: string; quality?: string },
+  params: GenerateImageParams,
   fetchImpl: typeof fetch,
   signal?: AbortSignal,
 ): Promise<RawImageResult[]> {
@@ -79,14 +123,18 @@ async function generateFromText(
   };
   if (params.size) body.size = params.size;
   if (params.quality) body.quality = params.quality;
+  if (params.outputFormat) body.output_format = params.outputFormat;
+  if (params.background) body.background = params.background;
+  if (params.outputCompression != null) body.output_compression = params.outputCompression;
 
   let res: Response;
   try {
     res = await fetchImpl(url, {
       method: 'POST',
-      headers: { ...bearerHeaders(provider), 'content-type': 'application/json' },
+      headers: jsonHeaders(provider),
       body: JSON.stringify(body),
       signal: signal ?? null,
+      redirect: credentialRedirectMode(provider),
     });
   } catch (error) {
     throw describeNetworkError(error, provider);
@@ -98,10 +146,11 @@ async function generateWithImages(
   provider: ResolvedProvider,
   base: string,
   remoteModelId: string,
-  params: { prompt: string; n?: number; size?: string; quality?: string },
+  params: GenerateImageParams,
   inputs: ResolvedImageInput[],
   fetchImpl: typeof fetch,
   signal?: AbortSignal,
+  mask?: ResolvedImageInput,
 ): Promise<RawImageResult[]> {
   const url = `${base}/images/edits`;
   const form = new FormData();
@@ -110,6 +159,13 @@ async function generateWithImages(
   form.append('n', String(params.n ?? 1));
   if (params.size) form.append('size', params.size);
   if (params.quality) form.append('quality', params.quality);
+  if (params.outputFormat) form.append('output_format', params.outputFormat);
+  if (params.background) form.append('background', params.background);
+  if (params.outputCompression != null) form.append('output_compression', String(params.outputCompression));
+  if (mask) {
+    const ext = mask.mimeType.split('/')[1] ?? 'png';
+    form.append('mask', new Blob([new Uint8Array(mask.bytes)], { type: mask.mimeType }), `mask.${ext}`);
+  }
   // OpenAI accepts repeated `image[]` for multi-image edits on gpt-image-2.
   const fieldName = inputs.length > 1 ? 'image[]' : 'image';
   for (const [i, input] of inputs.entries()) {
@@ -125,6 +181,7 @@ async function generateWithImages(
       headers: bearerHeaders(provider),
       body: form,
       signal: signal ?? null,
+      redirect: credentialRedirectMode(provider),
     });
   } catch (error) {
     throw describeNetworkError(error, provider);
@@ -200,6 +257,16 @@ export async function parseImagesResponse(
     if (typeof entry.revised_prompt === 'string') item.revisedPrompt = entry.revised_prompt;
     out.push(item);
   }
+  const requestId = res.headers.get('x-request-id') ?? res.headers.get('request-id') ?? undefined;
+  const usage = numericRecord(json.usage);
+  const cost = finiteNumber(json.cost) ?? finiteNumber(usage?.cost);
+  if (out[0] && (requestId || usage || cost != null)) {
+    out[0].metadata = {
+      ...(requestId ? { requestId } : {}),
+      ...(usage ? { usage } : {}),
+      ...(cost != null ? { cost } : {}),
+    };
+  }
   if (out.length === 0) {
     // Entry count is safe metadata; the raw body ("Raw: …") is not — drop it.
     const detail = `${provider.name} returned no usable images. Response had ${data.length} entries but none had b64_json or a valid url.`;
@@ -213,6 +280,18 @@ function invalidResponseError(provider: ResolvedProvider): ImageGenError {
     `${provider.name} returned an invalid image response.`,
     `${providerLogLabel(provider)} returned an invalid image response`,
   );
+}
+
+function finiteNumber(value: unknown): number | undefined {
+  return typeof value === 'number' && Number.isFinite(value) ? value : undefined;
+}
+
+function numericRecord(value: unknown): Record<string, number> | undefined {
+  if (!isRecord(value)) return undefined;
+  const entries = Object.entries(value).filter(
+    (entry): entry is [string, number] => typeof entry[1] === 'number' && Number.isFinite(entry[1]),
+  );
+  return entries.length > 0 ? Object.fromEntries(entries) : undefined;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

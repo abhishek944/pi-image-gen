@@ -53,7 +53,8 @@
   },
   "scripts": {
     "build": "tsc -b",
-    "typecheck": "tsc -b --pretty false"
+    "typecheck": "tsc -b --pretty false",
+    "check": "npm run typecheck && npm pack --dry-run --json >/dev/null"
   },
   "dependencies": {
     "@amaster.ai/pi-shared": "^0.1.10"

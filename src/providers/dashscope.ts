@@ -16,6 +16,7 @@ import type {
   ResolvedProvider,
 } from '../types.js';
 import { withDefaultPath } from '../url.js';
+import { credentialRedirectMode, hasProviderAuthentication, jsonHeaders } from './openai.js';
 
 /**
  * Alibaba DashScope text-to-image (Qwen-Image series). Sync only:
@@ -48,15 +49,11 @@ export const dashscopeAdapter: ImageProviderAdapter = {
     signal?: AbortSignal,
     inputs?: ResolvedImageInput[],
   ): Promise<RawImageResult[]> {
-    if (!provider.apiKey) {
+    if (!hasProviderAuthentication(provider)) {
       throw missingKeyError(provider);
     }
     const base = withDefaultPath(provider.baseUrl, '/api/v1');
-    const headers: Record<string, string> = {
-      authorization: `Bearer ${provider.apiKey}`,
-      'content-type': 'application/json',
-    };
-    if (provider.headers) Object.assign(headers, provider.headers);
+    const headers = jsonHeaders(provider);
 
     const userContent: Array<{ text?: string; image?: string }> = [];
     for (const input of inputs ?? []) {
@@ -76,11 +73,20 @@ export const dashscopeAdapter: ImageProviderAdapter = {
             n: params.n ?? 1,
             // Defaults to false upstream today, but pass it explicitly so a
             // flipped default can't start stamping "Qwen-Image" badges.
-            watermark: false,
+            watermark: params.watermark ?? false,
             ...(params.size ? { size: normalizeDashScopeSize(params.size) } : {}),
+            ...(params.negativePrompt ? { negative_prompt: params.negativePrompt } : {}),
+            ...(params.seed != null ? { seed: params.seed } : {}),
+            ...(params.promptEnhance != null ? { prompt_extend: params.promptEnhance } : {}),
+            ...(params.enableThinking != null
+              ? { enable_thinking: params.enableThinking }
+              : params.promptEnhance === false
+                ? { enable_thinking: false }
+                : {}),
           },
         }),
         signal: signal ?? null,
+        redirect: credentialRedirectMode(provider),
       });
     } catch (error) {
       throw describeNetworkError(error, provider);
@@ -134,6 +140,9 @@ export const dashscopeAdapter: ImageProviderAdapter = {
         }
       }
     }
+    const requestId = typeof json.request_id === 'string' ? json.request_id : res.headers.get('x-request-id') ?? undefined;
+    const usage = numericRecord(json.usage);
+    if (out[0] && (requestId || usage)) out[0].metadata = { ...(requestId ? { requestId } : {}), ...(usage ? { usage } : {}) };
     if (out.length === 0) {
       // Drop the raw body ("Raw: …") — it may echo the prompt or provider internals.
       const detail = `${provider.name} returned no images. The model may have refused the prompt or the response shape changed.`;
@@ -148,6 +157,12 @@ function invalidResponseError(provider: ResolvedProvider): ImageGenError {
     `${provider.name} returned an invalid image response.`,
     `${providerLogLabel(provider)} returned an invalid image response`,
   );
+}
+
+function numericRecord(value: unknown): Record<string, number> | undefined {
+  if (!isRecord(value)) return undefined;
+  const entries = Object.entries(value).filter((entry): entry is [string, number] => typeof entry[1] === 'number' && Number.isFinite(entry[1]));
+  return entries.length ? Object.fromEntries(entries) : undefined;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

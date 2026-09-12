@@ -83,6 +83,11 @@ Start from a clean base prompt, then make **one targeted change at a time** and 
 - `n` — model-specific variants of one prompt (default 1; universal extension maximum 10, with the schema description naming any lower active ceiling, such as 6 for Qwen). It is hidden for models such as Seedream and Meta Muse Image that return one image per request; direct calls requesting more than one are rejected.
 - `size` — e.g. `"1024x1024"`. Provider-specific; some models require a minimum (Seedream ≥ 4.5 needs 2K+, so `1024x1024` fails there). Meta Muse Image accepts a free-form size; official cookbook examples include `1024x1024`, `1536x1024`, and `1024x1536`.
 - `quality` — model-specific. GPT Image 2 and the verified Codex route expose `"low"` / `"medium"` / `"high"` / `"auto"`; OpenAI API models `gpt-image-2.5-flare` and `gpt-image-2.5-sunburst` also expose `"xhigh"` and `"max"`. This parameter is **provider-conditional**: it only exists in the tool schema for a built-in gpt-image route. It is absent for Gemini, DashScope/Qwen, Ark/Seedream, Meta Muse Image, non-gpt-image routes, and custom providers unless their model explicitly declares `capabilities.qualityValues` on an adapter that forwards quality. If you don't see `quality`, do not try to force it.
+- `outputFormat`, `background`, `outputCompression` — model-aware web-asset controls for verified OpenAI API and discovered OpenRouter routes. Transparent output requires PNG or WebP; compression is for JPEG/WebP.
+- `mask` — precise edit mask for verified OpenAI API models. It requires at least one `image` edit target; use a transparent mask region for the area to replace.
+- `negativePrompt`, `seed`, `promptEnhance`, `enableThinking`, `watermark` — provider-native controls shown only when the active model advertises them. Seeds improve reproducibility but do not guarantee identical bytes.
+- `seriesMaxImages` — Seedream related-image series, distinct from independent `n` variants.
+- Generation reports safe progress phases and is bounded by the configured request timeout. Result details can include duration, dimensions, request id, usage, and cost when available.
 - `filename` — output filename prefix (no extension). Reusing a name does not overwrite an earlier file — a sibling `-v2` is written instead.
 - `outputDir` — override the configured output dir for this call.
 

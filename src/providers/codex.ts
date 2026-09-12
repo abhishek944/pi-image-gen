@@ -15,6 +15,9 @@ export const codexAdapter: ImageProviderAdapter = {
       );
     }
     const auth = await resolveCodexAuth(runtime.modelRegistry);
+    if (signal?.aborted) {
+      throw new ImageGenError('Request to Codex Images was cancelled.', 'Codex request cancelled');
+    }
     const editing = Boolean(inputs?.length);
     const url = `${CODEX_IMAGES_BASE}/${editing ? 'edits' : 'generations'}`;
     const body: Record<string, unknown> = {

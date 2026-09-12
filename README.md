@@ -89,6 +89,8 @@ That's it. From the agent: `image_generate({ prompt: "a cyberpunk cat" })`.
     "defaultProvider": "gemini-api",
     "defaultModel": "nano-banana",
     "outputDir": ".pi/images",
+    "requestTimeoutMs": 120000,
+    "openRouterDiscovery": true,
 
     "providers": {
       "openai":     { "baseUrl": "https://my-proxy.example.com/v1", "apiKey": "${MY_OPENAI_KEY}" },
@@ -120,6 +122,8 @@ That's it. From the agent: `image_generate({ prompt: "a cyberpunk cat" })`.
 | `defaultProvider` | Authentication-specific route (`openai-api`, `codex-subscription`, `gemini-api`, `dashscope-api`, `openrouter-api`, `ark-api`, `meta-api`, `meta-subscription`, or a custom-provider id). Recommended for new configs. |
 | `defaultModel`    | Model id or alias the tool will use. **Required.**                                       |
 | `outputDir`       | Where to write generated images. Relative paths resolve against the session cwd. Default `.pi/images`. |
+| `requestTimeoutMs` | End-to-end deadline including inputs and downloads. `1000`–`900000`; default `120000`. |
+| `openRouterDiscovery` | Best-effort discovery of the selected OpenRouter model's supported parameters. Default `true`; failure falls back safely. |
 | `providers`       | Per-built-in-provider override. Set `apiKey`, `baseUrl`, or `headers` to point at a proxy or non-standard env var. |
 | `customProviders` | User-defined providers — see below. Built-in route ids such as `openai-api` and `meta-subscription` are reserved and cannot be shadowed. |
 
@@ -191,7 +195,7 @@ export ARK_API_KEY=...
 { "pi-image-gen": { "defaultModel": "seedream" } }
 ```
 
-> Supported `size` values are model-dependent, and the tool schema tells the agent the exact form for the active model: a tier token (`1K`/`1.5K`/`2K`/`3K`/`4K` — the list differs per model) or an explicit `"<w>x<h>"` pixel string, never mixed. Seedream 5.0 / 4.5 enforce a 2K pixel floor (`1024x1024` fails with `InvalidParameter`); 5.0 pro accepts `1K`/`1.5K`/`2K` down to 921,600 px; 4.0 accepts 1K. Full sizing matrix in the [official docs](https://www.volcengine.com/docs/82379/1824121). Seedream has **no `n` parameter** — the API generates one image per request (multi-image is the `sequential_image_generation` mechanism, not exposed here), so `n` is hidden for these models. The extension always sends `watermark: false` — Seedream's watermark switch defaults to `true` and would otherwise stamp an "AI 生成" badge in the corner of every image.
+> Supported `size` values are model-dependent, and the tool schema tells the agent the exact form for the active model: a tier token (`1K`/`1.5K`/`2K`/`3K`/`4K` — the list differs per model) or an explicit `"<w>x<h>"` pixel string, never mixed. Seedream 5.0 / 4.5 enforce a 2K pixel floor (`1024x1024` fails with `InvalidParameter`); 5.0 pro accepts `1K`/`1.5K`/`2K` down to 921,600 px; 4.0 accepts 1K. Full sizing matrix in the [official docs](https://www.volcengine.com/docs/82379/1824121). Seedream has **no `n` parameter**, so `n` is hidden. Supported non-Pro models instead expose `seriesMaxImages` for the API's related `sequential_image_generation` mode; Seedream 5.0 Pro does not support that mode. The extension sends `watermark: false` by default to avoid Seedream's upstream "AI 生成" badge, while an explicit `watermark: true` opts in.
 
 The default base URL is `https://ark.cn-beijing.volces.com/api/v3`. To use a different region (e.g. `ap-southeast`), override it:
 
@@ -265,10 +269,13 @@ Each custom provider declares:
 | ---------- | -------- | ------------------------------------------------------------------------------------ |
 | `api` | yes      | One of `openai`, `gemini`, `dashscope`, `openrouter`, `ark`, `meta`. Picks the image-API wire shape. |
 | `baseUrl`  | yes      | API endpoint URL. `$VAR` syntax supported.                                           |
-| `apiKey`   | usually  | API key string. `$VAR` syntax supported.                                             |
+| `apiKey`   | usually  | Credential string. `$VAR` syntax supported. Required for `bearer` and `header` authentication. |
+| `auth`     | no       | `{ "type": "bearer" }`, `{ "type": "header", "header": "x-api-key" }`, or explicit `{ "type": "none" }`. Omission preserves the adapter's legacy default (Gemini uses `x-goog-api-key`; the others use bearer). |
 | `name`     | no       | Display name shown in `/image-gen list`.                                             |
 | `headers`  | no       | Extra headers merged into every request.                                             |
 | `models`   | no       | Optional model id/alias list. Omit to make this a **catch-all** — the provider will accept any unknown model id (passed through as the remote id). Provide a list only when you want aliases or want to route specific ids elsewhere. Each entry is a string or `{ id, alias?, name?, capabilities? }`. |
+
+Requests using a named credential header reject redirects so that a gateway cannot forward that credential to another origin.
 
 A custom model whose `id` names a built-in model **inherits that model's capability contract** (size form, `n` ceiling, reference-image rules) so the tool schema stays accurate when you route a known model through your own gateway. Declare `capabilities` on the entry to override individual fields; anything undeclared falls back to the built-in entry, then to a conservative generic contract. Catch-all routes and unknown ids get no contract — the schema stays fully generic, as before.
 
@@ -281,6 +288,7 @@ A custom model whose `id` names a built-in model **inherits that model's capabil
         "api": "dashscope",
         "baseUrl": "https://gateway.corp.example/api/v1",
         "apiKey": "$GW_KEY",
+        "auth": { "type": "bearer" },
         "models": [
           "qwen-image-3.0",
           { "id": "my-finetune", "capabilities": { "nMax": 4, "maxReferenceImages": 2 } }
@@ -381,12 +389,22 @@ image_generate({
   aspectRatio?: string,            // Gemini models only — enum from the model's vocabulary
   imageSize?: string,              // Gemini models only — tier enum ("1K"/"2K"/"4K"), when the model has tiers
   quality?: 'low'|'medium'|'high'|'xhigh'|'max'|'auto', // exact enum is model-specific
+  outputFormat?: 'png'|'jpeg'|'webp', // verified OpenAI/OpenRouter routes
+  background?: 'auto'|'transparent'|'opaque',
+  outputCompression?: number,        // 0–100; JPEG/WebP only
+  mask?: string,                     // precise OpenAI edit mask; requires image
+  negativePrompt?: string,           // Qwen 3 / discovered OpenRouter support
+  seed?: number,
+  promptEnhance?: boolean,
+  enableThinking?: boolean,
+  watermark?: boolean,
+  seriesMaxImages?: number,          // Seedream related series; distinct from n
   filename?: string,               // filename prefix (no extension)
   outputDir?: string,              // override settings.outputDir for this call
 })
 ```
 
-Returns the absolute file path(s) of saved images. Files land in `outputDir` (default `<cwd>/.pi/images`), filename pattern `<filename or model-UTC-stamp>.<ext>`.
+Returns the absolute file path(s) of saved images. Files land in `outputDir` (default `<cwd>/.pi/images`), filename pattern `<filename or model-UTC-stamp>.<ext>`. Result details also include elapsed time and, when supplied by the provider, a sanitized request id, numeric usage/cost metadata, and decoded output dimensions.
 
 **The schema is model-aware.** Every built-in model carries a capability contract sourced from official API docs or clearly labeled extension safety limits, and the tool is registered with parameters shaped by that contract (on session start, and again after `/image-gen reload`) — so the agent sees exactly the knobs the active model honors, with documented values in enums and descriptions where available. Provider-specific numeric contracts (size ranges, `n` ceilings, and reference-image counts) are generally **advice, not a gate** because a self-hosted deployment or gateway may legitimately differ. Independently, the extension enforces universal safety ceilings of 16 references, 20MB per input, and 128MB combined, plus rejects parameter combinations an adapter would otherwise silently drop. Providers may enforce stricter limits.
 
@@ -406,6 +424,14 @@ Returns the absolute file path(s) of saved images. Files land in `outputDir` (de
   - custom providers by default, including OpenAI-*compatible* ones — wire format alone does **not** imply a quality vocabulary. A custom model may opt in by explicitly declaring `capabilities.qualityValues`; this is honored only for the custom OpenAI/OpenRouter adapters that forward `quality`.
 
   If `defaultModel` is unset or misconfigured, `quality` stays present (the tool remains fully featured and `execute` surfaces a friendly config error). Use `"low"` for fast drafts and a higher level for final assets or dense text.
+
+Advanced controls are also capability-gated:
+
+- OpenAI API GPT Image routes expose `outputFormat`, `background`, `outputCompression`, and `mask`. The private Codex subscription route does not inherit these public-API controls without separate verification. A mask requires an `image` edit target; transparent output requires PNG or WebP.
+- Qwen Image 3 routes expose `negativePrompt`, `seed`, `promptEnhance`, `enableThinking`, and `watermark`.
+- Seedream exposes `watermark` and `seriesMaxImages`. A series is a related set, not independent `n` variants.
+- OpenRouter capability discovery caches the selected model's endpoint metadata for ten minutes and may add format, background, compression, seed, or negative-prompt controls. Discovery has a five-second deadline and safely falls back to the static/generic schema.
+- Custom models may opt into the same fields through their `capabilities` declaration. Unsupported accepted parameters are rejected before a paid request rather than silently dropped.
 
 Because the schema is fixed at registration, switching models via `/image-gen reload` re-registers the tool so the parameter set tracks the new provider.
 
@@ -463,12 +489,17 @@ There is intentionally no `model` parameter on the tool — the active route/mod
 
 ## Slash commands
 
+- `/image-gen doctor` — validate the provider/model pair, authentication presence, timeout, custom-provider shapes, and output-directory writability without making a paid generation request or printing credentials.
+- `/image-gen setup` — interactively choose a configured route and compatible model. Non-interactive hosts receive equivalent `/image-gen use` guidance.
+- Command arguments provide completions for subcommands, routes, and known model ids.
 - `/image-gen list` — show output directory, default provider, default model, routes currently configured through API keys/Pi logins/custom settings, and every available provider/model route. OpenAI API vs Codex subscription and Meta API vs Meta subscription are separate entries. Listing login status never refreshes or retrieves an OAuth token.
 - `/image-gen set provider <provider>` — persist only the default provider route. If the existing model is incompatible, the command warns so you can set the model next.
 - `/image-gen set model <model>` — persist the model after validating it against the selected provider.
 - `/image-gen use <provider> <model>` — validate and persist both atomically. This is the recommended switch command.
 - `/image-gen reload` — re-read settings from disk and re-register the tool so its schema (e.g. whether `quality` is exposed) tracks the newly selected model.
 - `/image-gen generate <prompt>` — generate an image directly from the command line using the active model. Reports the saved file path(s) as a plain-text notification (the command uses `ctx.ui.notify`, which shows a status line, not rendered Markdown — so unlike the tool result it does not emit an inline `![](…)` image). Use the `image_generate` tool from the agent when you want the image rendered inline.
+
+Generation emits safe phase updates while loading inputs, waiting for the provider, and saving output. Escape cancellation and `requestTimeoutMs` propagate through provider requests and downloads. Paid generation POSTs are never retried automatically.
 
 The three settings commands update `<cwd>/.pi/settings.json` only for a trusted project. They merge the `pi-image-gen` object without replacing unrelated settings and immediately re-register the tool; manual edits still require `/image-gen reload`.
 

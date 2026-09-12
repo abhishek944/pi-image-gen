@@ -8,7 +8,7 @@ import type {
   ResolvedProvider,
 } from '../types.js';
 import { withDefaultPath } from '../url.js';
-import { bearerHeaders, parseImagesResponse } from './openai.js';
+import { credentialRedirectMode, hasProviderAuthentication, jsonHeaders, parseImagesResponse } from './openai.js';
 
 /**
  * OpenRouter image API. Looks OpenAI-shaped but the endpoint differs:
@@ -27,7 +27,7 @@ export const openrouterAdapter: ImageProviderAdapter = {
     signal?: AbortSignal,
     inputs?: ResolvedImageInput[],
   ): Promise<RawImageResult[]> {
-    if (!provider.apiKey) throw missingKeyError(provider);
+    if (!hasProviderAuthentication(provider)) throw missingKeyError(provider);
     const base = withDefaultPath(provider.baseUrl, '/api/v1');
     const url = `${base}/images`;
     const body: Record<string, unknown> = {
@@ -37,6 +37,11 @@ export const openrouterAdapter: ImageProviderAdapter = {
     };
     if (params.size) body.size = params.size;
     if (params.quality) body.quality = params.quality;
+    if (params.outputFormat) body.output_format = params.outputFormat;
+    if (params.background) body.background = params.background;
+    if (params.outputCompression != null) body.output_compression = params.outputCompression;
+    if (params.seed != null) body.seed = params.seed;
+    if (params.negativePrompt) body.negative_prompt = params.negativePrompt;
     if (inputs && inputs.length > 0) {
       body.input_references = inputs.map((input) => ({
         type: 'image_url',
@@ -48,9 +53,10 @@ export const openrouterAdapter: ImageProviderAdapter = {
     try {
       res = await fetchImpl(url, {
         method: 'POST',
-        headers: { ...bearerHeaders(provider), 'content-type': 'application/json' },
+        headers: jsonHeaders(provider),
         body: JSON.stringify(body),
         signal: signal ?? null,
+        redirect: credentialRedirectMode(provider),
       });
     } catch (error) {
       throw describeNetworkError(error, provider);

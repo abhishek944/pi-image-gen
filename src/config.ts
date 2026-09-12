@@ -15,6 +15,7 @@ import type {
   CustomApiStyle,
   CustomImageModel,
   CustomImageProvider,
+  CustomProviderAuth,
   ImageGenSettings,
   ImageModelCapabilities,
   ResolvedModel,
@@ -49,18 +50,23 @@ function inheritCapabilities(
   modelId: string,
   explicit: Partial<ImageModelCapabilities> | undefined,
   owner: string,
-): ImageModelCapabilities | undefined {
+): {
+  capabilities: ImageModelCapabilities;
+  declaredCapabilities?: Partial<ImageModelCapabilities>;
+  includesRegistry: boolean;
+} | undefined {
   const builtIn = findBuiltInModel(modelId)?.capabilities;
   if (!builtIn && !explicit) return undefined;
-  const merged: ImageModelCapabilities = { ...GENERIC_CAPABILITIES, ...builtIn };
-  if (explicit) {
-    for (const [key, value] of Object.entries(sanitizeCapabilities(explicit, owner))) {
-      if (value !== undefined) {
-        (merged as Record<string, unknown>)[key] = value;
-      }
-    }
+  const declaredCapabilities = explicit ? sanitizeCapabilities(explicit, owner) : undefined;
+  const capabilities: ImageModelCapabilities = { ...GENERIC_CAPABILITIES, ...builtIn };
+  for (const [key, value] of Object.entries(declaredCapabilities ?? {})) {
+    if (value !== undefined) (capabilities as Record<string, unknown>)[key] = value;
   }
-  return merged;
+  return {
+    capabilities,
+    ...(declaredCapabilities ? { declaredCapabilities } : {}),
+    includesRegistry: Boolean(builtIn),
+  };
 }
 
 export function loadImageGenSettings(cwd: string, projectTrusted = false): ImageGenSettings {
@@ -112,6 +118,8 @@ function buildCustomProvider(name: string, raw: unknown): ResolvedProvider | nul
   }
   if (raw.baseUrl !== undefined && typeof raw.baseUrl !== 'string') return null;
   if (raw.apiKey !== undefined && typeof raw.apiKey !== 'string') return null;
+  const customAuth = parseCustomAuth(raw.auth);
+  if (raw.auth !== undefined && !customAuth) return null;
   if (
     raw.name !== undefined &&
     (typeof raw.name !== 'string' || !raw.name.trim() || raw.name.trim() !== raw.name)
@@ -135,6 +143,7 @@ function buildCustomProvider(name: string, raw: unknown): ResolvedProvider | nul
     baseUrl,
     name: raw.name ?? name,
     builtIn: false,
+    ...(customAuth ? { customAuth } : {}),
   };
   const apiKey = trimCredential(raw.apiKey);
   if (apiKey) provider.apiKey = apiKey;
@@ -217,7 +226,13 @@ function resolveModelUnscoped(
           model.capabilities,
           `customProviders.${name} model "${model.id}"`,
         );
-        if (capabilities) resolved.capabilities = capabilities;
+        if (capabilities) {
+          resolved.capabilities = capabilities.capabilities;
+          if (capabilities.declaredCapabilities) {
+            resolved.declaredCapabilities = capabilities.declaredCapabilities;
+          }
+          resolved.capabilitiesIncludeRegistry = capabilities.includesRegistry;
+        }
         if (hasExplicitQualityValues(model.capabilities)) resolved.customQualityValues = true;
         return resolved;
       }
@@ -393,7 +408,8 @@ export function listProviderRoutes(settings: ImageGenSettings): ProviderRoute[] 
       authentication: 'custom',
       modelIds: models,
       acceptsAnyModel: models.length === 0,
-      configuredBySettings: Boolean(provider.apiKey),
+      configuredBySettings:
+        provider.customAuth?.type === 'none' || Boolean(provider.apiKey),
     });
   }
   return routes;
@@ -453,7 +469,13 @@ function resolveModelOnRoute(
         model.capabilities,
         `customProviders.${routeId} model "${remoteId}"`,
       );
-      if (capabilities) resolved.capabilities = capabilities;
+      if (capabilities) {
+        resolved.capabilities = capabilities.capabilities;
+        if (capabilities.declaredCapabilities) {
+          resolved.declaredCapabilities = capabilities.declaredCapabilities;
+        }
+        resolved.capabilitiesIncludeRegistry = capabilities.includesRegistry;
+      }
       if (hasExplicitQualityValues(model.capabilities)) resolved.customQualityValues = true;
     }
     return resolved;
@@ -509,6 +531,7 @@ function resolveModelOnRoute(
   }
 
   const provider = buildBuiltInProvider(route.providerId, settings)!;
+  if (route.id === 'codex-subscription') provider.authMode = 'oauth';
   if (route.id === 'meta-api') provider.authMode = 'api-key';
   if (route.id === 'meta-subscription') {
     provider.authMode = 'oauth';
@@ -591,7 +614,7 @@ export function listConfiguredProviders(settings: ImageGenSettings): ConfiguredP
   return out;
 }
 
-function isReservedProviderRouteId(value: string): value is BuiltInProviderRouteId {
+export function isReservedProviderRouteId(value: string): value is BuiltInProviderRouteId {
   return BUILT_IN_ROUTES.some((route) => route.id === value);
 }
 
@@ -605,6 +628,32 @@ function hasExplicitQualityValues(
       values.every((value) => typeof value === 'string' && value.length > 0) &&
       new Set(values).size === values.length,
   );
+}
+
+const RESERVED_AUTH_HEADERS = new Set([
+  'authorization',
+  'content-length',
+  'content-type',
+  'host',
+  'transfer-encoding',
+]);
+
+function parseCustomAuth(value: unknown): CustomProviderAuth | undefined {
+  if (value === undefined) return undefined;
+  if (!isRecord(value)) return undefined;
+  if (value.type === 'bearer' || value.type === 'none') {
+    return Object.keys(value).length === 1 ? { type: value.type } : undefined;
+  }
+  if (
+    value.type === 'header' &&
+    Object.keys(value).length === 2 &&
+    typeof value.header === 'string' &&
+    /^[A-Za-z0-9-]+$/.test(value.header) &&
+    !RESERVED_AUTH_HEADERS.has(value.header.toLowerCase())
+  ) {
+    return { type: 'header', header: value.header };
+  }
+  return undefined;
 }
 
 function trimCredential(value: unknown): string | undefined {

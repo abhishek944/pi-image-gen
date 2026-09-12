@@ -23,6 +23,11 @@ export type BuiltInProviderRouteId =
   | 'meta-api';
 
 /** A user-defined image-generation provider. */
+export type CustomProviderAuth =
+  | { type: 'bearer' }
+  | { type: 'header'; header: string }
+  | { type: 'none' };
+
 export type CustomImageProvider = {
   /**
    * Image-API wire shape this provider speaks. Determines which adapter
@@ -41,6 +46,8 @@ export type CustomImageProvider = {
    * Required unless the api does not need one.
    */
   apiKey?: string;
+  /** Authentication policy. Omitted values preserve the adapter's legacy default. */
+  auth?: CustomProviderAuth;
   /** Optional display name. */
   name?: string;
   /** Extra headers merged into every outbound request. */
@@ -82,6 +89,10 @@ export type ImageGenSettings = {
    * Default: `.pi/images`.
    */
   outputDir?: string;
+  /** Request deadline in milliseconds. Default 120000; allowed 1000–900000. */
+  requestTimeoutMs?: number;
+  /** Best-effort OpenRouter endpoint capability discovery. Default true. */
+  openRouterDiscovery?: boolean;
   /** Per-built-in-provider overrides keyed by provider id. */
   providers?: Partial<Record<BuiltInProviderId, BuiltInProviderOverride>>;
   /** User-defined custom providers keyed by provider name. */
@@ -122,6 +133,26 @@ export type GenerateImageParams = {
    * that don't expose a quality knob.
    */
   quality?: string;
+  /** Provider-supported output encoding. */
+  outputFormat?: 'png' | 'jpeg' | 'webp';
+  /** Provider-supported background behavior. */
+  background?: 'auto' | 'transparent' | 'opaque';
+  /** JPEG/WebP compression from 0–100. */
+  outputCompression?: number;
+  /** Optional edit mask path/URL; exposed only for verified mask-capable models. */
+  mask?: string;
+  /** Provider-native negative prompt. */
+  negativePrompt?: string;
+  /** Provider-native reproducibility seed. */
+  seed?: number;
+  /** Ask the provider to enhance/extend the prompt where supported. */
+  promptEnhance?: boolean;
+  /** Enable provider-side thinking where supported. */
+  enableThinking?: boolean;
+  /** Add the provider's visible AI watermark where supported. Default false. */
+  watermark?: boolean;
+  /** Seedream related-series maximum; distinct from independent `n` variants. */
+  seriesMaxImages?: number;
   /** Output filename prefix. */
   filename?: string;
   /** Override settings.outputDir for this call. */
@@ -134,6 +165,15 @@ export type ResolvedImageInput = {
   mimeType: string;
 };
 
+export type ImageDimensions = { width: number; height: number };
+
+export type GenerationMetadata = {
+  durationMs: number;
+  requestId?: string;
+  usage?: Record<string, number>;
+  cost?: number;
+};
+
 export type GeneratedImage = {
   /** Absolute path on disk where the image was saved. */
   path: string;
@@ -141,12 +181,14 @@ export type GeneratedImage = {
   mimeType: string;
   /** Pass-through revised prompt if the provider returned one (e.g. OpenAI). */
   revisedPrompt?: string;
+  dimensions?: ImageDimensions;
 };
 
 export type ImageGenResult = {
   model: string;
   provider: string;
   images: GeneratedImage[];
+  metadata?: GenerationMetadata;
 };
 
 /** Resolved provider entry: either a built-in or a custom one. */
@@ -159,6 +201,8 @@ export type ResolvedProvider = {
   headers?: Record<string, string>;
   /** Authentication behavior selected by a user-facing provider route. */
   authMode?: 'auto' | 'oauth' | 'api-key';
+  /** Custom-provider authentication policy; built-ins leave this unset. */
+  customAuth?: CustomProviderAuth;
   /** Display label. */
   name: string;
   /** True for built-in providers (openai/gemini/dashscope/openrouter). */
@@ -179,6 +223,10 @@ export type ResolvedModel = {
    * skip capability validation.
    */
   capabilities?: ImageModelCapabilities;
+  /** Sanitized fields explicitly declared by a custom model, before fallback inheritance. */
+  declaredCapabilities?: Partial<ImageModelCapabilities>;
+  /** True when `capabilities` inherits an official built-in registry contract. */
+  capabilitiesIncludeRegistry?: boolean;
   /** True when a custom model explicitly declared its quality vocabulary. */
   customQualityValues?: boolean;
 };
@@ -227,6 +275,16 @@ export type ImageModelCapabilities = {
   imageSizes?: string[];
   /** Model-specific quality vocabulary when the provider exposes a quality knob. */
   qualityValues?: string[];
+  outputFormats?: Array<'png' | 'jpeg' | 'webp'>;
+  backgroundValues?: Array<'auto' | 'transparent' | 'opaque'>;
+  supportsOutputCompression?: boolean;
+  supportsMask?: boolean;
+  supportsNegativePrompt?: boolean;
+  supportsSeed?: boolean;
+  supportsPromptEnhance?: boolean;
+  supportsThinking?: boolean;
+  supportsWatermark?: boolean;
+  supportsSeries?: boolean;
   /** Max images per request via `n`. 1 = the model has no count knob; `n` is hidden. */
   nMax: number;
   /** Whether nMax comes from provider docs or a conservative extension ceiling. */
@@ -281,10 +339,18 @@ export type ImageModelRegistry = {
 
 export type ImageProviderRuntime = {
   modelRegistry?: ImageModelRegistry;
+  mask?: ResolvedImageInput;
+};
+
+export type RawGenerationMetadata = {
+  requestId?: string;
+  usage?: Record<string, number>;
+  cost?: number;
 };
 
 export type RawImageResult = {
   /** Either base64 PNG bytes or a URL to fetch. */
   data: { kind: 'base64'; bytes: string; mimeType?: string } | { kind: 'url'; url: string };
   revisedPrompt?: string;
+  metadata?: RawGenerationMetadata;
 };

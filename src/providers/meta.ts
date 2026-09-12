@@ -20,6 +20,7 @@ import type {
   ResolvedProvider,
 } from '../types.js';
 import { withDefaultPath } from '../url.js';
+import { credentialRedirectMode, hasProviderAuthentication, jsonHeaders } from './openai.js';
 
 /**
  * Meta Model API image generation via the conversational Responses API.
@@ -53,9 +54,13 @@ export const metaAdapter: ImageProviderAdapter = {
     const base = withDefaultPath(provider.baseUrl, '/v1');
     const url = `${base}/responses`;
     const oauthKey = await resolveMetaOAuthApiKey(provider, runtime);
+    if (signal?.aborted) {
+      throw new ImageGenError('Request to Meta Model API was cancelled.', 'Meta request cancelled');
+    }
     const configuredKey = provider.apiKey?.trim();
     const apiKey = provider.authMode === 'oauth' ? oauthKey : (oauthKey ?? configuredKey);
-    if (!apiKey) throw missingKeyError(provider);
+    if (provider.authMode === 'oauth' && !oauthKey) throw missingKeyError(provider);
+    if (!apiKey && !hasProviderAuthentication(provider)) throw missingKeyError(provider);
     let input: unknown = params.prompt;
     if (inputs && inputs.length > 0) {
       const content: Array<Record<string, string>> = [
@@ -82,9 +87,13 @@ export const metaAdapter: ImageProviderAdapter = {
     try {
       res = await fetchImpl(url, {
         method: 'POST',
-        headers: metaRequestHeaders(provider, apiKey),
+        headers:
+          provider.builtIn || provider.customAuth == null
+            ? metaRequestHeaders(provider, apiKey!)
+            : jsonHeaders(provider),
         body: JSON.stringify(body),
         signal: signal ?? null,
+        redirect: credentialRedirectMode(provider),
       });
     } catch (error) {
       throw describeNetworkError(error, provider);
@@ -118,6 +127,9 @@ export const metaAdapter: ImageProviderAdapter = {
       out.push({ data });
     }
 
+    const requestId = typeof json.id === 'string' ? json.id : res.headers.get('x-request-id') ?? undefined;
+    const usage = numericRecord(json.usage);
+    if (out[0] && (requestId || usage)) out[0].metadata = { ...(requestId ? { requestId } : {}), ...(usage ? { usage } : {}) };
     if (out.length === 0) {
       throw new ImageGenError(
         `${provider.name} returned no image data — the model may have refused to generate. Tell the user to rephrase the prompt or try a different model.`,
@@ -182,6 +194,12 @@ function metaRequestHeaders(
   headers.authorization = `Bearer ${apiKey}`;
   headers['content-type'] = 'application/json';
   return headers;
+}
+
+function numericRecord(value: unknown): Record<string, number> | undefined {
+  if (!isRecord(value)) return undefined;
+  const entries = Object.entries(value).filter((entry): entry is [string, number] => typeof entry[1] === 'number' && Number.isFinite(entry[1]));
+  return entries.length ? Object.fromEntries(entries) : undefined;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

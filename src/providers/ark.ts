@@ -8,7 +8,7 @@ import type {
   ResolvedProvider,
 } from '../types.js';
 import { withDefaultPath } from '../url.js';
-import { bearerHeaders, parseImagesResponse } from './openai.js';
+import { credentialRedirectMode, hasProviderAuthentication, jsonHeaders, parseImagesResponse } from './openai.js';
 
 /**
  * Volcengine Ark image generation (ByteDance Seedream series).
@@ -31,7 +31,7 @@ export const arkAdapter: ImageProviderAdapter = {
     signal?: AbortSignal,
     inputs?: ResolvedImageInput[],
   ): Promise<RawImageResult[]> {
-    if (!provider.apiKey) {
+    if (!hasProviderAuthentication(provider)) {
       throw missingKeyError(provider);
     }
     const base = withDefaultPath(provider.baseUrl, '/api/v3');
@@ -41,15 +41,18 @@ export const arkAdapter: ImageProviderAdapter = {
       prompt: params.prompt,
       // Seedream's watermark switch defaults to true, stamping an "AI 生成"
       // badge in the corner — opt out explicitly.
-      watermark: false,
+      watermark: params.watermark ?? false,
     };
     if (params.size) body.size = params.size;
+    if (params.seriesMaxImages != null) {
+      body.sequential_image_generation = 'auto';
+      body.sequential_image_generation_options = { max_images: params.seriesMaxImages };
+    }
     // Seedream sizing is driven by `size` resolution tiers (1K/2K/4K), not an
     // OpenAI-style `quality` knob — forwarding `quality` here risks a 400, so we
     // intentionally drop it. See README provider table. The same applies to `n`:
-    // the Seedream API has no count parameter (multi-image is the
-    // sequential_image_generation mechanism, which we don't expose), so `n` is
-    // neither offered in the schema nor forwarded on the wire.
+    // related multi-image output uses the separately named and capability-gated
+    // sequential_image_generation mechanism exposed as seriesMaxImages.
     if (inputs && inputs.length > 0) {
       body.image = inputs.map((input) => toDataUri(input));
     }
@@ -58,9 +61,10 @@ export const arkAdapter: ImageProviderAdapter = {
     try {
       res = await fetchImpl(url, {
         method: 'POST',
-        headers: { ...bearerHeaders(provider), 'content-type': 'application/json' },
+        headers: jsonHeaders(provider),
         body: JSON.stringify(body),
         signal: signal ?? null,
+        redirect: credentialRedirectMode(provider),
       });
     } catch (error) {
       throw describeNetworkError(error, provider);

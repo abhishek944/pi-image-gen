@@ -107,6 +107,10 @@ export const BUILT_IN_MODELS: BuiltInModelEntry[] = [
         maxEdge: 3840,
       },
       qualityValues: ['low', 'medium', 'high', 'auto'],
+      outputFormats: ['png', 'jpeg', 'webp'],
+      backgroundValues: ['auto', 'transparent', 'opaque'],
+      supportsOutputCompression: true,
+      supportsMask: true,
       nMax: 10,
       maxReferenceImages: 16,
       inputFormats: ['PNG', 'WEBP', 'JPEG'],
@@ -138,6 +142,10 @@ export const BUILT_IN_MODELS: BuiltInModelEntry[] = [
         maxEdge: 3840,
       },
       qualityValues: ['low', 'medium', 'high', 'xhigh', 'max', 'auto'],
+      outputFormats: ['png', 'jpeg', 'webp'] as Array<'png' | 'jpeg' | 'webp'>,
+      backgroundValues: ['auto', 'transparent', 'opaque'] as Array<'auto' | 'transparent' | 'opaque'>,
+      supportsOutputCompression: true,
+      supportsMask: true,
       nMax: 10,
       maxReferenceImages: 16,
       inputFormats: ['PNG', 'WEBP', 'JPEG'],
@@ -233,30 +241,23 @@ export const BUILT_IN_MODELS: BuiltInModelEntry[] = [
   // Size is "<width>*<height>" (asterisk, NOT "x"); total pixels must stay
   // between 512*512 and 2048*2048. Reference images: JPG/JPEG/PNG/BMP/TIFF/
   // WEBP/GIF, ≤ 10MB each, up to 3. Output is always PNG.
-  {
-    id: 'qwen-image-3.0-pro',
-    provider: 'dashscope',
+  ...(['qwen-image-3.0-pro', 'qwen-image-3.0'] as const).map((id) => ({
+    id,
+    provider: 'dashscope' as const,
     capabilities: {
       sizeRange: QWEN3_SIZE_RANGE,
+      supportsNegativePrompt: true,
+      supportsSeed: true,
+      supportsPromptEnhance: true,
+      supportsThinking: true,
+      supportsWatermark: true,
       nMax: 6,
       maxReferenceImages: 3,
       inputFormats: QWEN_INPUT_FORMATS,
       inputMaxBytes: 10 * MB,
       inputDimAdvice: 'reference images work best with both dimensions between 384 and 2048 px',
     },
-  },
-  {
-    id: 'qwen-image-3.0',
-    provider: 'dashscope',
-    capabilities: {
-      sizeRange: QWEN3_SIZE_RANGE,
-      nMax: 6,
-      maxReferenceImages: 3,
-      inputFormats: QWEN_INPUT_FORMATS,
-      inputMaxBytes: 10 * MB,
-      inputDimAdvice: 'reference images work best with both dimensions between 384 and 2048 px',
-    },
-  },
+  })),
   {
     id: 'qwen-image-2.0-pro',
     provider: 'dashscope',
@@ -298,6 +299,8 @@ export const BUILT_IN_MODELS: BuiltInModelEntry[] = [
     provider: 'ark',
     capabilities: {
       // 5.0 pro accepts 1K/1.5K/2K tiers; pixel range 1280x720–2048x2048-class.
+      // Unlike the non-Pro 5.0 model, Pro does not support related series output.
+      supportsWatermark: true,
       sizeRange: {
         separator: 'x',
         tiers: ['1K', '1.5K', '2K'],
@@ -319,6 +322,8 @@ export const BUILT_IN_MODELS: BuiltInModelEntry[] = [
     provider: 'ark',
     capabilities: {
       // 5.0 (lite): 2K floor — 1K pixel sizes fail with InvalidParameter.
+      supportsWatermark: true,
+      supportsSeries: true,
       sizeRange: {
         separator: 'x',
         tiers: ['2K', '3K', '4K'],
@@ -339,6 +344,8 @@ export const BUILT_IN_MODELS: BuiltInModelEntry[] = [
     aliases: ['seedream-4-5'],
     provider: 'ark',
     capabilities: {
+      supportsWatermark: true,
+      supportsSeries: true,
       sizeRange: {
         separator: 'x',
         tiers: ['2K', '4K'],
@@ -360,6 +367,8 @@ export const BUILT_IN_MODELS: BuiltInModelEntry[] = [
     provider: 'ark',
     capabilities: {
       // 4.0 is the only Seedream that still accepts 1K-class pixel sizes.
+      supportsWatermark: true,
+      supportsSeries: true,
       sizeRange: {
         separator: 'x',
         tiers: ['1K', '2K', '4K'],

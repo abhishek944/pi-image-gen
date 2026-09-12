@@ -1,15 +1,20 @@
+import { constants as fsConstants } from 'node:fs';
+import { access, lstat, stat } from 'node:fs/promises';
+import { dirname, isAbsolute, resolve } from 'node:path';
 import { isProjectTrusted } from '@amaster.ai/pi-shared/settings';
 import { StringEnum } from '@earendil-works/pi-ai';
 import type { ExtensionAPI, ExtensionContext } from '@earendil-works/pi-coding-agent';
 import { Type } from 'typebox';
 import {
+  capabilitiesForApi,
   capabilitySizeDescription,
+  genericCapabilitiesForApi,
   hasAspectRatioKnob,
-  hasImageSizeKnob,
   referenceImageDescription,
 } from './capabilities.js';
 import {
   canonicalProviderRouteId,
+  isReservedProviderRouteId,
   listProviderRoutes,
   loadImageGenSettings,
   resolveModel,
@@ -17,6 +22,7 @@ import {
 import { errorMessageForUser, toLogSummary } from './errors.js';
 import { generateImage } from './generate.js';
 import { MAX_GENERATED_IMAGES, MAX_REFERENCE_IMAGE_INPUTS } from './image-input.js';
+import { discoverOpenRouterCapabilities } from './openrouter-discovery.js';
 import { canUseMetaOAuth } from './providers/meta.js';
 import { SettingsWriteError, updateProjectImageGenSettings } from './settings-write.js';
 import type {
@@ -61,6 +67,8 @@ export interface ImageToolCapabilities {
 export default function piImageGenExtension(pi: ExtensionAPI): void {
   let settings: ImageGenSettings = {};
   let sessionCwd = process.cwd();
+  let discoveredCapabilities: Partial<ImageModelCapabilities> | undefined;
+  let discoveryRevision = 0;
 
   // Single generate path shared by the tool's execute() and the /image-gen
   // generate command, so options construction and signal wiring can't drift
@@ -71,10 +79,17 @@ export default function piImageGenExtension(pi: ExtensionAPI): void {
     cwd: string,
     signal?: AbortSignal,
     modelRegistry?: ImageModelRegistry,
+    onProgress?: (phase: 'loading-inputs' | 'waiting-provider' | 'saving-output') => void,
   ): Promise<ImageGenResult> => {
-    const opts: Parameters<typeof generateImage>[1] = { cwd, settings };
+    const effectiveModel = resolveImageToolCapabilities(settings, discoveredCapabilities).model;
+    const opts: Parameters<typeof generateImage>[1] = {
+      cwd,
+      settings,
+      ...(effectiveModel ? { modelCapabilities: effectiveModel } : {}),
+    };
     if (signal) opts.signal = signal;
     if (modelRegistry) opts.modelRegistry = modelRegistry;
+    if (onProgress) opts.onProgress = onProgress;
     return generateImage(params, opts);
   };
 
@@ -86,7 +101,7 @@ export default function piImageGenExtension(pi: ExtensionAPI): void {
   // providers whose API honors it; the model never sees a no-op knob it would
   // otherwise have to reason about.
   const registerImageTool = (): void => {
-    const caps = resolveImageToolCapabilities(settings);
+    const caps = resolveImageToolCapabilities(settings, discoveredCapabilities);
     pi.registerTool({
       name: 'image_generate',
       label: 'ImageGen',
@@ -96,7 +111,7 @@ export default function piImageGenExtension(pi: ExtensionAPI): void {
         'Generate or edit raster images (photos, illustrations, textures, mockups). Not for icons/logos/diagrams that should be repo-native SVG/CSS/canvas.',
       promptGuidelines: buildImageGuidelines(caps),
       parameters: buildImageToolParameters(caps) as never,
-      async execute(_toolCallId: string, rawParams: unknown, signal, _onUpdate, ctx) {
+      async execute(_toolCallId: string, rawParams: unknown, signal, onUpdate, ctx) {
         const params = rawParams as GenerateImageParams;
         const cwd = ctx?.cwd ?? sessionCwd;
         try {
@@ -105,6 +120,10 @@ export default function piImageGenExtension(pi: ExtensionAPI): void {
             cwd,
             signal,
             ctx.modelRegistry as unknown as ImageModelRegistry,
+            (phase) => onUpdate?.({
+              content: [{ type: 'text' as const, text: progressMessage(phase) }],
+              details: { phase },
+            }),
           );
           return {
             content: [{ type: 'text' as const, text: formatToolResultText(result) }],
@@ -122,21 +141,51 @@ export default function piImageGenExtension(pi: ExtensionAPI): void {
     });
   };
 
+  const publishSettings = async (nextSettings: ImageGenSettings): Promise<boolean> => {
+    const revision = ++discoveryRevision;
+    let nextDiscovered: Partial<ImageModelCapabilities> | undefined;
+    const model = trimmedSetting(nextSettings.defaultModel);
+    if (model) {
+      const resolved = resolveModel(model, nextSettings);
+      if (!('error' in resolved)) {
+        nextDiscovered = await discoverOpenRouterCapabilities(
+          resolved,
+          nextSettings.openRouterDiscovery !== false,
+        );
+      }
+    }
+    if (revision !== discoveryRevision) return false;
+    // Publish one coherent snapshot: execute-time settings, discovered controls,
+    // and the advertised schema must always advance together.
+    settings = nextSettings;
+    discoveredCapabilities = nextDiscovered;
+    registerImageTool();
+    return true;
+  };
+
   pi.on('session_start', async (_event: unknown, ctx: ExtensionContext) => {
     sessionCwd = ctx.cwd;
-    settings = loadImageGenSettings(ctx.cwd, isProjectTrusted(ctx));
-    registerImageTool();
+    await publishSettings(loadImageGenSettings(ctx.cwd, isProjectTrusted(ctx)));
   });
 
   pi.registerCommand('image-gen', {
     description:
-      'pi-image-gen: /image-gen [list|reload|set provider <id>|set model <id>|use <provider> <model>|generate <prompt>]',
+      'pi-image-gen: /image-gen [list|doctor|setup|reload|set provider <id>|set model <id>|use <provider> <model>|generate <prompt>]',
+    getArgumentCompletions: (prefix: string) => imageGenCompletions(prefix, settings),
     handler: async (args: string | undefined, ctx: ExtensionContext) => {
       const raw = (args ?? '').trim();
       const tokens = raw.split(/\s+/).filter(Boolean);
+      if (tokens[0] === 'doctor') {
+        const report = await diagnoseImageGen(
+          settings,
+          ctx.cwd,
+          ctx.modelRegistry as unknown as ImageModelRegistry,
+        );
+        ctx.ui.notify(report.join('\n'), report.some((line) => line.startsWith('ERROR')) ? 'error' : 'info');
+        return;
+      }
       if (tokens[0] === 'reload') {
-        settings = loadImageGenSettings(ctx.cwd, isProjectTrusted(ctx));
-        registerImageTool();
+        await publishSettings(loadImageGenSettings(ctx.cwd, isProjectTrusted(ctx)));
         ctx.ui.notify('pi-image-gen settings reloaded.', 'info');
         return;
       }
@@ -147,17 +196,37 @@ export default function piImageGenExtension(pi: ExtensionAPI): void {
           return;
         }
         const cwd = ctx.cwd ?? sessionCwd;
+        const commandController = new AbortController();
+        const forwardAbort = () => commandController.abort(ctx.signal?.reason);
+        ctx.signal?.addEventListener('abort', forwardAbort, { once: true });
+        const dialogController = new AbortController();
+        const cancellationDialog =
+          ctx.mode === 'tui'
+            ? ctx.ui
+                .select('Generating image… Esc cancels', ['Cancel generation'], {
+                  signal: dialogController.signal,
+                })
+                .then(() => {
+                  if (!dialogController.signal.aborted) commandController.abort();
+                })
+            : undefined;
         try {
           const result = await runGenerate(
             { prompt },
             cwd,
-            ctx.signal,
+            commandController.signal,
             ctx.modelRegistry as unknown as ImageModelRegistry,
+            (phase) => ctx.ui.setStatus('pi-image-gen', progressMessage(phase)),
           );
           ctx.ui.notify(formatCommandSummary(result), 'info');
         } catch (error) {
           console.error(`[pi-image-gen] /image-gen generate failed: ${toLogSummary(error)}`);
           ctx.ui.notify(`image generation failed: ${errorMessageForUser(error)}`, 'error');
+        } finally {
+          ctx.signal?.removeEventListener('abort', forwardAbort);
+          dialogController.abort();
+          await cancellationDialog;
+          ctx.ui.setStatus('pi-image-gen', undefined);
         }
         return;
       }
@@ -167,8 +236,7 @@ export default function piImageGenExtension(pi: ExtensionAPI): void {
       ): Promise<boolean> => {
         try {
           await updateProjectImageGenSettings(ctx.cwd, isProjectTrusted(ctx), update);
-          settings = loadImageGenSettings(ctx.cwd, isProjectTrusted(ctx));
-          registerImageTool();
+          await publishSettings(loadImageGenSettings(ctx.cwd, isProjectTrusted(ctx)));
           return true;
         } catch (error) {
           const message =
@@ -179,6 +247,40 @@ export default function piImageGenExtension(pi: ExtensionAPI): void {
           return false;
         }
       };
+
+      if (tokens[0] === 'setup') {
+        if (!ctx.hasUI) {
+          ctx.ui.notify('Guided setup needs an interactive Pi host. Use /image-gen list, then /image-gen use <provider> <model>.', 'error');
+          return;
+        }
+        const login = discoverLoginRoutes(ctx.modelRegistry as unknown as ImageModelRegistry, settings);
+        const routes = listProviderRoutes(settings).filter(
+          (route) => route.configuredBySettings ||
+            (route.id === 'codex-subscription' && login.codex) ||
+            (route.id === 'meta-subscription' && login.meta),
+        );
+        if (routes.length === 0) {
+          ctx.ui.notify('No configured API-key or custom routes were found. Configure authentication, then run /image-gen setup again.', 'error');
+          return;
+        }
+        const routeChoice = await ctx.ui.select(
+          'Choose an image provider',
+          routes.map((route) => `${route.id} — ${route.label}`),
+        );
+        if (!routeChoice) return;
+        const routeId = routeChoice.split(' — ')[0]!;
+        const route = routes.find((candidate) => candidate.id === routeId)!;
+        const models = route.modelIds.length > 0 ? route.modelIds : [];
+        if (models.length === 0) {
+          ctx.ui.notify(`Provider ${routeId} accepts pass-through model ids. Use /image-gen use ${routeId} <model>.`, 'info');
+          return;
+        }
+        const model = await ctx.ui.select('Choose an image model', models);
+        if (!model) return;
+        if (!(await saveDefaults({ defaultProvider: routeId, defaultModel: model }))) return;
+        ctx.ui.notify(`Using ${routeId} with ${model}.`, 'info');
+        return;
+      }
 
       if (tokens[0] === 'set' && tokens[1] === 'provider') {
         if (tokens.length !== 3) {
@@ -250,7 +352,7 @@ export default function piImageGenExtension(pi: ExtensionAPI): void {
 
       if (tokens.length > 0 && tokens[0] !== 'list') {
         ctx.ui.notify(
-          'Usage: /image-gen [list|reload|set provider <id>|set model <id>|use <provider> <model>|generate <prompt>]',
+          'Usage: /image-gen [list|doctor|setup|reload|set provider <id>|set model <id>|use <provider> <model>|generate <prompt>]',
           'error',
         );
         return;
@@ -299,6 +401,135 @@ export default function piImageGenExtension(pi: ExtensionAPI): void {
       ctx.ui.notify(lines.join('\n'), 'info');
     },
   });
+}
+
+export function imageGenCompletions(prefix: string, settings: ImageGenSettings): Array<{ value: string; label: string }> | null {
+  const commands = ['list', 'doctor', 'setup', 'reload', 'generate', 'set provider', 'set model', 'use'];
+  const raw = prefix.trimStart();
+  const routes = listProviderRoutes(settings);
+  const candidates = [...commands];
+  for (const route of routes) {
+    candidates.push(`set provider ${route.id}`);
+    candidates.push(`use ${route.id}`);
+    for (const model of route.modelIds) candidates.push(`use ${route.id} ${model}`);
+  }
+  const selected = trimmedSetting(settings.defaultProvider);
+  const selectedRouteId = selected ? (canonicalProviderRouteId(selected, settings) ?? selected) : undefined;
+  const selectedRoute = routes.find((route) => route.id === selectedRouteId);
+  for (const model of selectedRoute?.modelIds ?? []) candidates.push(`set model ${model}`);
+  const unique = [...new Set(candidates)]
+    .filter((value) => value.startsWith(raw))
+    .slice(0, 50)
+    .map((value) => ({ value, label: value }));
+  return unique.length > 0 ? unique : null;
+}
+
+export async function diagnoseImageGen(
+  settings: ImageGenSettings,
+  cwd: string,
+  registry?: ImageModelRegistry,
+): Promise<string[]> {
+  const lines = ['pi-image-gen doctor'];
+  const model = trimmedSetting(settings.defaultModel);
+  const provider = trimmedSetting(settings.defaultProvider);
+  if (!model) lines.push('ERROR: defaultModel is not set.');
+  if (!provider) lines.push('WARN: defaultProvider is not set; legacy automatic routing is active.');
+  if (model) {
+    const resolved = resolveModel(model, settings);
+    if ('error' in resolved) lines.push(`ERROR: ${resolved.error}`);
+    else {
+      const login = registry ? discoverLoginRoutes(registry, settings) : { codex: false, meta: false };
+      const loginReady = resolved.provider.builtIn && (
+        (resolved.provider.id === 'codex' && login.codex) ||
+        (resolved.provider.id === 'meta' && login.meta && canUseMetaOAuth(resolved.provider))
+      );
+      const authReady = resolved.provider.builtIn && resolved.provider.id === 'codex'
+        ? login.codex
+        : resolved.provider.authMode === 'oauth'
+          ? loginReady
+          : resolved.provider.authMode === 'api-key'
+            ? Boolean(resolved.provider.apiKey)
+            : loginReady || resolved.provider.customAuth?.type === 'none' || Boolean(resolved.provider.apiKey);
+      lines.push(`OK: ${resolved.provider.id}/${resolved.requestedId} resolves.`);
+      lines.push(authReady ? 'OK: authentication is configured or resolved at request time.' : 'ERROR: authentication is not configured for the selected route.');
+    }
+  }
+  if (settings.requestTimeoutMs !== undefined &&
+      (!Number.isInteger(settings.requestTimeoutMs) || settings.requestTimeoutMs < 1_000 || settings.requestTimeoutMs > 900_000)) {
+    lines.push('ERROR: requestTimeoutMs must be an integer from 1000 to 900000.');
+  } else {
+    lines.push(`OK: request timeout is ${settings.requestTimeoutMs ?? 120_000}ms.`);
+  }
+  const rawCustom = settings.customProviders as unknown;
+  if (rawCustom !== undefined && (typeof rawCustom !== 'object' || rawCustom === null || Array.isArray(rawCustom))) {
+    lines.push('ERROR: customProviders must be an object.');
+  } else if (rawCustom && typeof rawCustom === 'object') {
+    for (const [id, raw] of Object.entries(rawCustom as Record<string, unknown>)) {
+      if (isReservedProviderRouteId(id)) {
+        lines.push(`ERROR: custom provider ${id} uses a reserved route id.`);
+        continue;
+      }
+      if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
+        lines.push(`ERROR: customProviders.${id} must be an object.`);
+        continue;
+      }
+      const route = listProviderRoutes({ ...settings, customProviders: { [id]: raw as never } })
+        .find((candidate) => candidate.id === id);
+      lines.push(route ? `OK: custom provider ${id} is valid.` : `ERROR: custom provider ${id} is malformed or uses a reserved id.`);
+    }
+  }
+  const configured = typeof settings.outputDir === 'string' && settings.outputDir.trim() ? settings.outputDir : '.pi/images';
+  const output = isAbsolute(configured) ? configured : resolve(cwd, configured);
+  let probe = output;
+  while (true) {
+    let info;
+    try {
+      info = await stat(probe);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
+        lines.push('ERROR: the configured output path cannot be inspected.');
+        break;
+      }
+      try {
+        const linkInfo = await lstat(probe);
+        if (linkInfo.isSymbolicLink()) {
+          lines.push('ERROR: the configured output path contains a dangling symbolic link.');
+          break;
+        }
+      } catch (linkError) {
+        if ((linkError as NodeJS.ErrnoException).code !== 'ENOENT') {
+          lines.push('ERROR: the configured output path cannot be inspected.');
+          break;
+        }
+      }
+      const parent = dirname(probe);
+      if (parent === probe) {
+        lines.push('ERROR: no existing parent was found for the configured output directory.');
+        break;
+      }
+      probe = parent;
+      continue;
+    }
+    if (!info.isDirectory()) {
+      lines.push('ERROR: the configured output path contains an existing non-directory component.');
+      break;
+    }
+    try {
+      await access(probe, fsConstants.W_OK | fsConstants.X_OK);
+      lines.push('OK: output directory or its nearest existing parent is writable.');
+    } catch {
+      lines.push('ERROR: the configured output directory or its nearest existing parent is not writable.');
+    }
+    break;
+  }
+  if (!lines.some((line) => line.startsWith('ERROR'))) lines.push('PASS: no blocking configuration problems found.');
+  return lines;
+}
+
+function progressMessage(phase: 'loading-inputs' | 'waiting-provider' | 'saving-output'): string {
+  if (phase === 'loading-inputs') return 'Loading and validating image inputs…';
+  if (phase === 'waiting-provider') return 'Waiting for the image provider…';
+  return 'Saving generated image output…';
 }
 
 function trimmedSetting(value: unknown): string | undefined {
@@ -387,7 +618,10 @@ function honorsGptImageQuality(api: ApiStyle, remoteId: string): boolean {
  * the fully-featured schema so the tool stays usable and `execute` can surface a
  * friendly config error.
  */
-export function resolveImageToolCapabilities(settings: ImageGenSettings): ImageToolCapabilities {
+export function resolveImageToolCapabilities(
+  settings: ImageGenSettings,
+  discovered?: Partial<ImageModelCapabilities>,
+): ImageToolCapabilities {
   const defaultModel = trimmedSetting(settings.defaultModel);
   if (!defaultModel) return { api: null, quality: QUALITY_VALUES, model: null };
   const resolved = resolveModel(defaultModel, settings);
@@ -401,7 +635,22 @@ export function resolveImageToolCapabilities(settings: ImageGenSettings): ImageT
           (provider.api === 'openai' || provider.api === 'openrouter')
         ? (resolved.capabilities?.qualityValues ?? null)
         : null;
-  return { api: provider.api, quality, model: resolved.capabilities ?? null };
+  const model = resolved.capabilities
+    ? provider.builtIn || resolved.capabilitiesIncludeRegistry
+      ? { ...(discovered ?? {}), ...resolved.capabilities }
+      : {
+          ...genericAdvertisedCapabilities(provider.api),
+          ...(discovered ?? {}),
+          ...(resolved.declaredCapabilities ?? {}),
+        }
+    : discovered
+      ? { ...genericCapabilitiesForApi('openrouter'), ...discovered }
+      : null;
+  return {
+    api: provider.api,
+    quality,
+    model: model ? capabilitiesForApi(model, provider.api) : null,
+  };
 }
 
 /**
@@ -409,6 +658,17 @@ export function resolveImageToolCapabilities(settings: ImageGenSettings): ImageT
  * capability contract (custom providers without a registry match). Models
  * with a contract get a precise description from {@link capabilitySizeDescription}.
  */
+function genericAdvertisedCapabilities(api: ApiStyle): ImageModelCapabilities {
+  const capabilities = genericCapabilitiesForApi(api);
+  if (api === 'gemini') {
+    // `aspectRatios: ['auto']` is an internal validation fallback, not a model
+    // declaration. Unknown partial Gemini contracts must keep both sizing
+    // controls free-form unless the user explicitly narrows either field.
+    delete capabilities.aspectRatios;
+  }
+  return capabilities;
+}
+
 export function sizeDescription(api: ApiStyle | null): string {
   if (api === 'ark') {
     return 'Image size such as "2048x2048". Seedream 5.0 / 5.0-lite / 4.5 require 2K or larger — "1024x1024" fails with InvalidParameter; only Seedream 4.0 accepts 1K sizes.';
@@ -442,8 +702,11 @@ const IMAGE_PARAM_BASE =
 export function buildImageToolParameters(caps: ImageToolCapabilities) {
   const model = caps.model;
   const aspectRatios = model && hasAspectRatioKnob(model) ? model.aspectRatios : undefined;
-  const tieredImageSizes = model && hasImageSizeKnob(model) ? model.imageSizes : undefined;
-  const showSize = !aspectRatios;
+  const declaredImageSizes = model?.imageSizes;
+  const tieredImageSizes = (declaredImageSizes?.length ?? 0) > 1 ? declaredImageSizes : undefined;
+  const genericGemini = caps.api === 'gemini' && !aspectRatios;
+  const genericImageSize = genericGemini && !declaredImageSizes;
+  const showSize = !aspectRatios && !genericGemini;
   const sizeText = showSize
     ? ((model ? capabilitySizeDescription(model) : null) ?? sizeDescription(caps.api))
     : null;
@@ -484,20 +747,24 @@ export function buildImageToolParameters(caps: ImageToolCapabilities) {
           ),
         }
       : {}),
-    ...(aspectRatios
+    ...(aspectRatios || genericGemini
       ? {
           aspectRatio: Type.Optional(
-            StringEnum(aspectRatios, {
-              description: 'Aspect ratio for the active model (it has no pixel-size knob).',
-            }),
+            aspectRatios
+              ? StringEnum(aspectRatios, {
+                  description: 'Aspect ratio for the active model (it has no pixel-size knob).',
+                })
+              : Type.String({ description: 'Provider-supported aspect ratio such as "1:1" or "16:9".' }),
           ),
-          ...(tieredImageSizes
+          ...(tieredImageSizes || genericImageSize
             ? {
                 imageSize: Type.Optional(
-                  StringEnum(tieredImageSizes, {
-                    description:
-                      'Output resolution tier for the active model (uppercase "K"). Omit for the default tier.',
-                  }),
+                  tieredImageSizes
+                    ? StringEnum(tieredImageSizes, {
+                        description:
+                          'Output resolution tier for the active model (uppercase "K"). Omit for the default tier.',
+                      })
+                    : Type.String({ description: 'Provider-supported output resolution tier such as "1K" or "2K".' }),
                 ),
               }
             : {}),
@@ -513,6 +780,36 @@ export function buildImageToolParameters(caps: ImageToolCapabilities) {
             }),
           ),
         }
+      : {}),
+    ...(model?.outputFormats?.length
+      ? { outputFormat: Type.Optional(StringEnum(model.outputFormats, { description: 'Output image encoding.' })) }
+      : {}),
+    ...(model?.backgroundValues?.length
+      ? { background: Type.Optional(StringEnum(model.backgroundValues, { description: 'Background behavior. Transparent output requires a format that preserves alpha.' })) }
+      : {}),
+    ...(model?.supportsOutputCompression
+      ? { outputCompression: Type.Optional(Type.Integer({ minimum: 0, maximum: 100, description: 'JPEG/WebP compression level from 0 to 100.' })) }
+      : {}),
+    ...(model?.supportsMask
+      ? { mask: Type.Optional(Type.String({ description: 'Mask image path or public URL for precise editing. Requires at least one image edit target; transparent mask regions are replaced.' })) }
+      : {}),
+    ...(model?.supportsNegativePrompt
+      ? { negativePrompt: Type.Optional(Type.String({ description: 'Provider-native description of content to avoid.' })) }
+      : {}),
+    ...(model?.supportsSeed
+      ? { seed: Type.Optional(Type.Integer({ minimum: 0, maximum: 2_147_483_647, description: 'Provider seed for more reproducible results; exact identity is not guaranteed.' })) }
+      : {}),
+    ...(model?.supportsPromptEnhance
+      ? { promptEnhance: Type.Optional(Type.Boolean({ description: 'Allow provider-native prompt enhancement.' })) }
+      : {}),
+    ...(model?.supportsThinking
+      ? { enableThinking: Type.Optional(Type.Boolean({ description: 'Enable provider-side image reasoning; may increase latency.' })) }
+      : {}),
+    ...(model?.supportsWatermark
+      ? { watermark: Type.Optional(Type.Boolean({ description: 'Add the provider AI watermark. Default false.' })) }
+      : {}),
+    ...(model?.supportsSeries
+      ? { seriesMaxImages: Type.Optional(Type.Integer({ minimum: 1, maximum: MAX_GENERATED_IMAGES, description: 'Maximum related images for a Seedream series; this is not the same as independent n variants.' })) }
       : {}),
     filename: Type.Optional(Type.String({ description: 'Filename prefix (without extension).' })),
     outputDir: Type.Optional(
@@ -573,9 +870,14 @@ export function formatToolResultText(result: ImageGenResult): string {
     ...result.images.flatMap((img) => {
       const alt = altFromPath(img.path);
       const md = `![${alt}](${markdownImageUrl(img.path)})`;
-      return img.revisedPrompt ? [md, `> revised prompt: ${img.revisedPrompt}`] : [md];
+      const dimensions = img.dimensions ? ` (${img.dimensions.width}×${img.dimensions.height})` : '';
+      return img.revisedPrompt ? [`${md}${dimensions}`, `> revised prompt: ${img.revisedPrompt}`] : [`${md}${dimensions}`];
     }),
   ];
+  if (result.metadata?.requestId) lines.push('', `Request ID: ${result.metadata.requestId}`);
+  if (result.metadata?.usage) lines.push(`Usage: ${formatNumericMetadata(result.metadata.usage)}`);
+  if (result.metadata?.cost != null) lines.push(`Cost: ${result.metadata.cost}`);
+  if (result.metadata) lines.push(`Duration: ${result.metadata.durationMs}ms`);
   return lines.join('\n');
 }
 
@@ -616,6 +918,13 @@ function encodeUrlSegment(segment: string): string {
  * — including CJK — passes through byte-identical, so POSIX paths that render
  * inline today keep their exact current output.
  */
+function formatNumericMetadata(metadata: Record<string, number>): string {
+  return Object.entries(metadata)
+    .sort(([left], [right]) => left.localeCompare(right))
+    .map(([name, value]) => `${name}=${value}`)
+    .join(', ');
+}
+
 function escapeMarkdownUnsafe(path: string): string {
   return path.replace(/[\s#%()?<>]/g, hexEscape);
 }
@@ -637,7 +946,15 @@ export function formatCommandSummary(result: ImageGenResult): string {
       ? [`  ${img.path}`, `    revised prompt: ${img.revisedPrompt}`]
       : [`  ${img.path}`],
   );
-  return [header, ...lines].join('\n');
+  const metadata = result.metadata
+    ? [
+        `  duration: ${result.metadata.durationMs}ms`,
+        ...(result.metadata.requestId ? [`  request id: ${result.metadata.requestId}`] : []),
+        ...(result.metadata.usage ? [`  usage: ${formatNumericMetadata(result.metadata.usage)}`] : []),
+        ...(result.metadata.cost != null ? [`  cost: ${result.metadata.cost}`] : []),
+      ]
+    : [];
+  return [header, ...lines, ...metadata].join('\n');
 }
 
 /**

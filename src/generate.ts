@@ -6,7 +6,13 @@ import {
   type TrustedHosts,
   trustedHostsFromUrls,
 } from '@amaster.ai/pi-shared';
-import { validateGenerateParams, validateImageCount } from './capabilities.js';
+import {
+  capabilitiesForApi,
+  genericCapabilitiesForApi,
+  hasAspectRatioKnob,
+  validateGenerateParams,
+  validateImageCount,
+} from './capabilities.js';
 import { resolveModel } from './config.js';
 import {
   cancelledError,
@@ -20,6 +26,7 @@ import {
   MAX_BASE64_IMAGE_CHARS,
   MAX_GENERATED_IMAGES,
   MAX_IMAGE_BYTES,
+  MAX_TOTAL_REFERENCE_IMAGE_BYTES,
   resolveImageInputs,
   sniffMime,
 } from './image-input.js';
@@ -29,6 +36,7 @@ import type {
   GenerateImageParams,
   ImageGenResult,
   ImageGenSettings,
+  ImageModelCapabilities,
   ImageModelRegistry,
   RawImageResult,
   ResolvedProvider,
@@ -44,6 +52,10 @@ export type GenerateImageOptions = {
   now?: () => Date;
   /** Pi runtime registry used by subscription-backed providers such as Codex. */
   modelRegistry?: ImageModelRegistry;
+  /** Effective registration contract, including live discovery when available. */
+  modelCapabilities?: ImageModelCapabilities;
+  /** Sanitized phase updates for the Pi tool UI. */
+  onProgress?: (phase: 'loading-inputs' | 'waiting-provider' | 'saving-output') => void;
 };
 
 const MIME_TO_EXT: Record<string, string> = {
@@ -62,6 +74,29 @@ export async function generateImage(
   params: GenerateImageParams,
   options: GenerateImageOptions,
 ): Promise<ImageGenResult> {
+  const timeoutMs = validatedTimeout(options.settings.requestTimeoutMs);
+  const deadline = deadlineSignal(options.signal, timeoutMs);
+  try {
+    return await generateImageInternal(params, { ...options, signal: deadline.signal });
+  } catch (error) {
+    if (deadline.timedOut()) {
+      throw new ImageGenError(
+        `Image generation exceeded the ${Math.round(timeoutMs / 1000)} second request timeout. Increase pi-image-gen.requestTimeoutMs if this provider normally needs longer.`,
+        'image generation timed out',
+      );
+    }
+    throw error;
+  } finally {
+    deadline.cleanup();
+  }
+}
+
+async function generateImageInternal(
+  params: GenerateImageParams,
+  options: GenerateImageOptions,
+): Promise<ImageGenResult> {
+  const startedAt = Date.now();
+  if (options.signal?.aborted) throw cancelledError('image generation');
   const fetchImpl = options.fetchImpl ?? fetch;
   const now = options.now ?? (() => new Date());
 
@@ -93,21 +128,52 @@ export async function generateImage(
   // Pre-flight guards only against parameter combinations our adapters would
   // silently drop (see capabilities.ts) — documented numeric limits are
   // schema-description advice, and the provider's error is the backstop.
-  if (resolved.capabilities) {
-    validateGenerateParams(params, resolved.capabilities, resolved.requestedId);
-  }
+  const effectiveCapabilities = options.modelCapabilities ??
+    (resolved.capabilities
+      ? capabilitiesForApi(resolved.capabilities, resolved.provider.api)
+      : genericCapabilitiesForApi(resolved.provider.api));
+  const validationCapabilities = resolved.provider.api === 'gemini' &&
+      !hasAspectRatioKnob(effectiveCapabilities)
+    ? { ...effectiveCapabilities, aspectRatios: ['auto'] }
+    : effectiveCapabilities;
+  validateGenerateParams(params, validationCapabilities, resolved.requestedId);
 
   const adapter = getAdapter(resolved.provider.api);
-  const inputs = await resolveImageInputs(params.image, options.cwd, safeFetch, options.signal);
-  const runtime = options.modelRegistry ? { modelRegistry: options.modelRegistry } : undefined;
-  const raws = await adapter.generate(
-    resolved.provider,
-    resolved.remoteId,
-    params,
-    fetchImpl,
+  options.onProgress?.('loading-inputs');
+  const inputs = await awaitWithAbort(
+    resolveImageInputs(params.image, options.cwd, safeFetch, options.signal),
     options.signal,
-    inputs,
-    runtime,
+  );
+  const referenceBytes = inputs.reduce((total, input) => total + input.bytes.byteLength, 0);
+  const masks = params.mask
+    ? await awaitWithAbort(
+        resolveImageInputs(
+          [params.mask],
+          options.cwd,
+          safeFetch,
+          options.signal,
+          MAX_TOTAL_REFERENCE_IMAGE_BYTES - referenceBytes,
+        ),
+        options.signal,
+      )
+    : [];
+  if (options.signal?.aborted) throw cancelledError('image generation');
+  const runtime = {
+    ...(options.modelRegistry ? { modelRegistry: options.modelRegistry } : {}),
+    ...(masks[0] ? { mask: masks[0] } : {}),
+  };
+  options.onProgress?.('waiting-provider');
+  const raws = await awaitWithAbort(
+    adapter.generate(
+      resolved.provider,
+      resolved.remoteId,
+      params,
+      fetchImpl,
+      options.signal,
+      inputs,
+      runtime,
+    ),
+    options.signal,
   );
   if (raws.length > MAX_GENERATED_IMAGES) {
     throw new ImageGenError(
@@ -130,6 +196,7 @@ export async function generateImage(
     // path-free, actionable hint instead of letting it reach a sink verbatim.
     throw describeWriteError('create the output directory', error);
   }
+  if (options.signal?.aborted) throw cancelledError('image generation');
 
   const stamp = formatStamp(now());
   const baseFilename = sanitizeFilename(params.filename ?? `${resolved.requestedId}-${stamp}`);
@@ -137,6 +204,7 @@ export async function generateImage(
   // subdomains) so provider-side caches on private/fake-ip networks still work.
   const trustedHosts = trustedHostsFromUrls(resolved.provider.baseUrl);
   const images: GeneratedImage[] = [];
+  options.onProgress?.('saving-output');
   try {
     for (let i = 0; i < raws.length; i++) {
       // Re-check before each write: a base64 result never touches fetch, so the
@@ -144,7 +212,10 @@ export async function generateImage(
       // multi-image materialize/write would keep writing files and return success.
       if (options.signal?.aborted) throw cancelledError('image generation');
       const raw = raws[i]!;
-      const fetched = await materialize(raw, options.signal, trustedHosts);
+      const fetched = await awaitWithAbort(
+        materialize(raw, options.signal, trustedHosts),
+        options.signal,
+      );
       if (options.signal?.aborted) throw cancelledError('image generation');
       const ext = MIME_TO_EXT[fetched.mimeType] ?? 'png';
       const suffix = raws.length > 1 ? `-${i + 1}` : '';
@@ -156,6 +227,8 @@ export async function generateImage(
         options.signal,
       );
       const image: GeneratedImage = { path, mimeType: fetched.mimeType };
+      const dimensions = readImageDimensions(fetched.bytes, fetched.mimeType);
+      if (dimensions) image.dimensions = dimensions;
       if (raw.revisedPrompt) image.revisedPrompt = raw.revisedPrompt;
       images.push(image);
     }
@@ -176,10 +249,16 @@ export async function generateImage(
     throw error;
   }
 
+  const rawMetadata = raws.find((raw) => raw.metadata)?.metadata;
+  const providerMetadata = sanitizeGenerationMetadata(rawMetadata);
   return {
     model: resolved.requestedId,
     provider: providerLabel(resolved.provider),
     images,
+    metadata: {
+      durationMs: Date.now() - startedAt,
+      ...providerMetadata,
+    },
   };
 }
 
@@ -267,6 +346,121 @@ async function writeUnique(
       throw describeWriteError('write the image file', error);
     }
   }
+}
+
+function sanitizeGenerationMetadata(
+  metadata: RawImageResult['metadata'],
+): Omit<NonNullable<ImageGenResult['metadata']>, 'durationMs'> {
+  if (!metadata) return {};
+  const requestId = typeof metadata.requestId === 'string' &&
+      /^[A-Za-z0-9._:/-]{1,200}$/.test(metadata.requestId)
+    ? metadata.requestId
+    : undefined;
+  const usageEntries = Object.entries(metadata.usage ?? {})
+    .filter(([name, value]) => /^[A-Za-z0-9_.:-]{1,64}$/.test(name) && Number.isFinite(value))
+    .slice(0, 50);
+  const usage = usageEntries.length > 0 ? Object.fromEntries(usageEntries) : undefined;
+  const cost = typeof metadata.cost === 'number' && Number.isFinite(metadata.cost) && metadata.cost >= 0
+    ? metadata.cost
+    : undefined;
+  return {
+    ...(requestId ? { requestId } : {}),
+    ...(usage ? { usage } : {}),
+    ...(cost != null ? { cost } : {}),
+  };
+}
+
+function validatedTimeout(value: unknown): number {
+  return typeof value === 'number' && Number.isInteger(value) && value >= 1_000 && value <= 900_000
+    ? value
+    : 120_000;
+}
+
+async function awaitWithAbort<T>(promise: Promise<T>, signal: AbortSignal | undefined): Promise<T> {
+  if (!signal) return promise;
+  if (signal.aborted) {
+    void promise.catch(() => {});
+    throw cancelledError('image generation');
+  }
+  return new Promise<T>((resolve, reject) => {
+    const onAbort = () => reject(cancelledError('image generation'));
+    signal.addEventListener('abort', onAbort, { once: true });
+    if (signal.aborted) onAbort();
+    promise.then(
+      (value) => {
+        signal.removeEventListener('abort', onAbort);
+        resolve(value);
+      },
+      (error) => {
+        signal.removeEventListener('abort', onAbort);
+        reject(error);
+      },
+    );
+  });
+}
+
+function deadlineSignal(parent: AbortSignal | undefined, timeoutMs: number): {
+  signal: AbortSignal;
+  timedOut: () => boolean;
+  cleanup: () => void;
+} {
+  const controller = new AbortController();
+  let didTimeOut = false;
+  const onAbort = () => controller.abort(parent?.reason);
+  if (parent?.aborted) onAbort();
+  else parent?.addEventListener('abort', onAbort, { once: true });
+  const timer = setTimeout(() => {
+    didTimeOut = true;
+    controller.abort(new Error('request timeout'));
+  }, timeoutMs);
+  return {
+    signal: controller.signal,
+    timedOut: () => didTimeOut,
+    cleanup: () => {
+      clearTimeout(timer);
+      parent?.removeEventListener('abort', onAbort);
+    },
+  };
+}
+
+function readImageDimensions(bytes: Uint8Array, mimeType: string): { width: number; height: number } | undefined {
+  if (mimeType === 'image/png' && bytes.byteLength >= 24) {
+    return {
+      width: Buffer.from(bytes).readUInt32BE(16),
+      height: Buffer.from(bytes).readUInt32BE(20),
+    };
+  }
+  if (mimeType === 'image/webp' && bytes.byteLength >= 30) {
+    const view = Buffer.from(bytes);
+    const chunk = view.toString('ascii', 12, 16);
+    if (chunk === 'VP8X') {
+      const width = 1 + view[24]! + (view[25]! << 8) + (view[26]! << 16);
+      const height = 1 + view[27]! + (view[28]! << 8) + (view[29]! << 16);
+      return { width, height };
+    }
+    if (chunk === 'VP8 ' && view[23] === 0x9d && view[24] === 0x01 && view[25] === 0x2a) {
+      return { width: view.readUInt16LE(26) & 0x3fff, height: view.readUInt16LE(28) & 0x3fff };
+    }
+    if (chunk === 'VP8L' && view[20] === 0x2f) {
+      const bits = view.readUInt32LE(21);
+      return { width: (bits & 0x3fff) + 1, height: ((bits >>> 14) & 0x3fff) + 1 };
+    }
+  }
+  if ((mimeType === 'image/jpeg' || mimeType === 'image/jpg') && bytes.byteLength >= 4) {
+    const view = Buffer.from(bytes);
+    let offset = 2;
+    while (offset + 9 < view.length) {
+      if (view[offset] !== 0xff) break;
+      const marker = view[offset + 1]!;
+      const length = view.readUInt16BE(offset + 2);
+      if (length < 2 || offset + length + 2 > view.length) break;
+      if ((marker >= 0xc0 && marker <= 0xc3) || (marker >= 0xc5 && marker <= 0xc7) || (marker >= 0xc9 && marker <= 0xcb) || (marker >= 0xcd && marker <= 0xcf)) {
+        return { width: view.readUInt16BE(offset + 7), height: view.readUInt16BE(offset + 5) };
+      }
+      offset += length + 2;
+    }
+  }
+  return undefined;
 }
 
 async function materialize(

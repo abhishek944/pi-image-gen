@@ -5,7 +5,7 @@ import {
   MAX_REFERENCE_IMAGE_INPUTS,
   MAX_TOTAL_REFERENCE_IMAGE_BYTES,
 } from './image-input.js';
-import type { GenerateImageParams, ImageModelCapabilities } from './types.js';
+import type { ApiStyle, GenerateImageParams, ImageModelCapabilities } from './types.js';
 
 /**
  * Capability-driven description helpers, shared by the tool schema builder
@@ -22,6 +22,61 @@ import type { GenerateImageParams, ImageModelCapabilities } from './types.js';
  * rejects parameter combinations OUR adapters would silently drop (see
  * validateGenerateParams).
  */
+
+/**
+ * Remove model-declared controls that the selected wire adapter cannot carry.
+ * This matters for custom providers that deliberately pair a familiar model id
+ * with a different API shape.
+ */
+export function capabilitiesForApi(
+  capabilities: ImageModelCapabilities,
+  api: ApiStyle,
+): ImageModelCapabilities {
+  const clean = { ...capabilities };
+  if (api === 'gemini') {
+    delete clean.sizes;
+    delete clean.sizeRange;
+  } else {
+    delete clean.aspectRatios;
+    delete clean.imageSizes;
+  }
+  if (api !== 'openai' && api !== 'openrouter') {
+    delete clean.qualityValues;
+    delete clean.outputFormats;
+    delete clean.backgroundValues;
+    delete clean.supportsOutputCompression;
+  }
+  if (
+    clean.supportsOutputCompression &&
+    !clean.outputFormats?.some((format) => format === 'jpeg' || format === 'webp')
+  ) {
+    delete clean.supportsOutputCompression;
+  }
+  if (api !== 'openai') delete clean.supportsMask;
+  if (api !== 'dashscope' && api !== 'openrouter') {
+    delete clean.supportsNegativePrompt;
+    delete clean.supportsSeed;
+  }
+  if (api !== 'dashscope') {
+    delete clean.supportsPromptEnhance;
+    delete clean.supportsThinking;
+  }
+  if (api !== 'dashscope' && api !== 'ark') delete clean.supportsWatermark;
+  if (api !== 'ark') delete clean.supportsSeries;
+  return clean;
+}
+
+export function genericCapabilitiesForApi(api: ApiStyle): ImageModelCapabilities {
+  return {
+    ...(api === 'gemini' ? { aspectRatios: ['auto'] } : {}),
+    nMax: api === 'ark' || api === 'meta' ? 1 : MAX_GENERATED_IMAGES,
+    nMaxSource: 'extension',
+    maxReferenceImages: MAX_REFERENCE_IMAGE_INPUTS,
+    inputFormats: ['PNG', 'JPEG', 'GIF', 'WEBP'],
+    inputMaxBytes: MAX_IMAGE_BYTES,
+    referenceLimitsSource: 'extension',
+  };
+}
 
 /** Shared pixel-size matcher ("<w>x<h>" or "<w>*<h>") — also used by the DashScope adapter. */
 export const SIZE_PIXEL_RE = /^(\d{2,5})\s*[x*]\s*(\d{2,5})$/i;
@@ -142,13 +197,55 @@ export function validateGenerateParams(
         'size unsupported by model',
       );
     }
-    return;
-  }
-  if (params.aspectRatio || params.imageSize) {
+  } else if (params.aspectRatio || params.imageSize) {
     throw new ImageGenError(
       `${modelId} does not accept aspectRatio/imageSize — use size instead.`,
       'aspect knobs unsupported by model',
     );
+  }
+  const unsupported: Array<[unknown, boolean | undefined, string]> = [
+    [params.outputFormat, Boolean(caps.outputFormats?.length), 'outputFormat'],
+    [params.background, Boolean(caps.backgroundValues?.length), 'background'],
+    [params.outputCompression, caps.supportsOutputCompression, 'outputCompression'],
+    [params.mask, caps.supportsMask, 'mask'],
+    [params.negativePrompt, caps.supportsNegativePrompt, 'negativePrompt'],
+    [params.seed, caps.supportsSeed, 'seed'],
+    [params.promptEnhance, caps.supportsPromptEnhance, 'promptEnhance'],
+    [params.enableThinking, caps.supportsThinking, 'enableThinking'],
+    [params.watermark, caps.supportsWatermark, 'watermark'],
+    [params.seriesMaxImages, caps.supportsSeries, 'seriesMaxImages'],
+  ];
+  for (const [value, supported, name] of unsupported) {
+    if (value !== undefined && !supported) {
+      throw new ImageGenError(`${modelId} does not support ${name}.`, `${name} unsupported by model`);
+    }
+  }
+  if (params.outputFormat && !caps.outputFormats?.includes(params.outputFormat)) {
+    throw new ImageGenError(`${modelId} does not support output format ${params.outputFormat}.`, 'outputFormat invalid');
+  }
+  if (params.background && !caps.backgroundValues?.includes(params.background)) {
+    throw new ImageGenError(`${modelId} does not support background ${params.background}.`, 'background invalid');
+  }
+  if (params.outputCompression != null && (!Number.isInteger(params.outputCompression) || params.outputCompression < 0 || params.outputCompression > 100)) {
+    throw new ImageGenError('outputCompression must be an integer from 0 to 100.', 'outputCompression invalid');
+  }
+  if (params.outputCompression != null && params.outputFormat !== 'jpeg' && params.outputFormat !== 'webp') {
+    throw new ImageGenError('outputCompression requires an explicit jpeg or webp outputFormat.', 'outputCompression requires compressed format');
+  }
+  if (params.background === 'transparent' && params.outputFormat === 'jpeg') {
+    throw new ImageGenError('Transparent backgrounds require png or webp outputFormat.', 'transparent jpeg unsupported');
+  }
+  if (params.mask && (!params.image || params.image.length === 0)) {
+    throw new ImageGenError('mask requires at least one edit target in image.', 'mask without edit target');
+  }
+  if (params.seed != null && (!Number.isSafeInteger(params.seed) || params.seed < 0 || params.seed > 2_147_483_647)) {
+    throw new ImageGenError('seed must be an integer from 0 to 2147483647.', 'seed invalid');
+  }
+  if (params.enableThinking === true && params.promptEnhance === false) {
+    throw new ImageGenError('enableThinking requires promptEnhance to remain enabled.', 'thinking requires prompt enhancement');
+  }
+  if (params.seriesMaxImages != null && (!Number.isInteger(params.seriesMaxImages) || params.seriesMaxImages < 1 || params.seriesMaxImages > MAX_GENERATED_IMAGES)) {
+    throw new ImageGenError(`seriesMaxImages must be an integer from 1 to ${MAX_GENERATED_IMAGES}.`, 'seriesMaxImages invalid');
   }
 }
 
@@ -225,6 +322,25 @@ export function sanitizeCapabilities(
       case 'qualityValues':
         if (stringArray(value)) clean.qualityValues = value;
         else drop(key, value, 'an array of quality values');
+        break;
+      case 'outputFormats':
+        if (stringArray(value) && value.every((v) => v === 'png' || v === 'jpeg' || v === 'webp')) clean.outputFormats = value as Array<'png' | 'jpeg' | 'webp'>;
+        else drop(key, value, 'an array containing png, jpeg, or webp');
+        break;
+      case 'backgroundValues':
+        if (stringArray(value) && value.every((v) => v === 'auto' || v === 'transparent' || v === 'opaque')) clean.backgroundValues = value as Array<'auto' | 'transparent' | 'opaque'>;
+        else drop(key, value, 'an array containing auto, transparent, or opaque');
+        break;
+      case 'supportsOutputCompression':
+      case 'supportsMask':
+      case 'supportsNegativePrompt':
+      case 'supportsSeed':
+      case 'supportsPromptEnhance':
+      case 'supportsThinking':
+      case 'supportsWatermark':
+      case 'supportsSeries':
+        if (typeof value === 'boolean') (clean as Record<string, unknown>)[key] = value;
+        else drop(key, value, 'a boolean');
         break;
       case 'referenceLimitsSource':
         if (value === 'provider' || value === 'extension') clean.referenceLimitsSource = value;
