@@ -1,6 +1,6 @@
 {
   "name": "@abhishek944/pi-image-gen",
-  "version": "0.4.0",
+  "version": "0.4.1",
   "description": "Image and optional sprite-sheet generation for Pi via ChatGPT Codex subscriptions, OpenAI, Gemini, Qwen, Seedream, Meta Muse Image, OpenRouter, and custom providers.",
   "keywords": [
     "pi-package",
@@ -21,17 +21,23 @@
   "license": "Apache-2.0",
   "type": "module",
   "sideEffects": false,
-  "main": "./src/index.ts",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
   "exports": {
     ".": {
-      "default": "./src/index.ts"
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "default": "./dist/index.js"
     },
-    "./package.json": {
-      "default": "./package.json"
-    }
+    "./extension": {
+      "types": "./dist/extension.d.ts",
+      "import": "./dist/extension.js",
+      "default": "./dist/extension.js"
+    },
+    "./package.json": "./package.json"
   },
   "files": [
-    "src",
+    "dist",
     "skills",
     "preview.png",
     "README.md",
@@ -40,7 +46,7 @@
   "pi": {
     "image": "https://raw.githubusercontent.com/abhishek944/pi-image-gen/main/preview.png",
     "extensions": [
-      "./src/index.ts"
+      "./dist/extension.js"
     ],
     "skills": [
       "./skills"
@@ -51,11 +57,13 @@
   },
   "repository": {
     "type": "git",
-    "url": "https://github.com/abhishek944/pi-image-gen.git"
+    "url": "git+https://github.com/abhishek944/pi-image-gen.git"
   },
   "scripts": {
-    "build": "tsc -b",
-    "typecheck": "tsc -b --pretty false",
+    "clean": "node -e \"require('node:fs').rmSync('dist', { recursive: true, force: true })\"",
+    "build": "npm run clean && tsc -p tsconfig.build.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit --pretty false",
+    "prepare": "npm run build",
     "check": "npm run typecheck && npm pack --dry-run --json >/dev/null"
   },
   "dependencies": {

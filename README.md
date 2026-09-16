@@ -41,10 +41,27 @@ pi install npm:@abhishek944/pi-image-gen
 Or directly from GitHub:
 
 ```sh
-pi install git:github.com/abhishek944/pi-image-gen@v0.2.0
+pi install git:github.com/abhishek944/pi-image-gen@v0.4.1
 ```
 
-The package's `pi.extensions` field auto-registers it with the host pi-coding-agent runtime; no extra wiring needed.
+The package's `pi.extensions` field auto-registers the compiled `dist/extension.js` entry with the host pi-coding-agent runtime; no extra wiring needed.
+
+### Use as a Node library
+
+The npm package ships compiled ESM JavaScript and TypeScript declarations, so a normal Node 22 process can import the library without a TypeScript loader:
+
+```js
+import {
+  generateImage,
+  runSpritePipeline,
+} from '@abhishek944/pi-image-gen';
+```
+
+The package root is intentionally the lightweight library entry and does not load Pi-only runtime modules. Hosts that manually register the Pi extension instead of using the `pi.extensions` manifest can import its default export explicitly:
+
+```js
+import piImageGenExtension from '@abhishek944/pi-image-gen/extension';
+```
 
 ## Configure
 

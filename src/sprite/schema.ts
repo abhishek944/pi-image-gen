@@ -1,11 +1,11 @@
 import { StringEnum } from '@earendil-works/pi-ai';
-import { Type } from 'typebox';
+import { Type, type TObject } from 'typebox';
 import { hasAspectRatioKnob } from '../capabilities.js';
 import { MAX_REFERENCE_IMAGE_INPUTS } from '../image-input.js';
-import type { ImageToolCapabilities } from '../index.js';
+import type { ImageToolCapabilities } from '../extension.js';
 import { HARD_MAX_SPRITE_FRAMES } from './settings.js';
 
-export function buildSpriteToolParameters(caps: ImageToolCapabilities) {
+export function buildSpriteToolParameters(caps: ImageToolCapabilities): TObject {
   const model = caps.model;
   const aspectRatios = model && hasAspectRatioKnob(model) ? model.aspectRatios : undefined;
   const genericGemini = caps.api === 'gemini' && !aspectRatios;
