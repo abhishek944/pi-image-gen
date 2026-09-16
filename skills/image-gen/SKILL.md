@@ -1,6 +1,6 @@
 ---
 name: image-gen
-description: "Generate or edit raster images with the image_generate tool: photos, illustrations, textures, sprites, product/UI mockups, concept art, or image-to-image edits. Use when the deliverable is a bitmap asset. Do NOT use for icons, logos, diagrams, or UI graphics that should be repo-native SVG/vector/CSS/canvas — edit or write those directly."
+description: "Generate or edit raster images with the image_generate tool: photos, illustrations, textures, sprites, product/UI mockups, concept art, icons, logos, diagrams, or image-to-image edits. For assets that could be repo-native SVG/vector/CSS/canvas, treat that format as a preference when editability or exact integration matters—not as a prohibition on image generation."
 ---
 
 # Image generation
@@ -14,12 +14,16 @@ This skill guides use of the `image_generate` tool from `@abhishek944/pi-image-g
 - Editing an existing image: inpainting, background replacement, object removal, lighting or weather changes, compositing, style transfer, character preservation.
 - Several assets or variants for one task.
 
-## When NOT to use
+## Choosing image generation vs repo-native assets
 
-- Extending or matching an existing SVG/vector icon set, logo system, or illustration library in the repo — edit those source files directly.
-- Simple shapes, diagrams, wireframes, or icons better produced in SVG, HTML/CSS, or canvas.
-- A small project-local asset edit when the source already exists in an editable native format.
-- Any task where the user clearly wants deterministic code-native output, not a generated bitmap.
+Repo-native SVG/vector/CSS/canvas is a preference in the cases below, not a hard restriction. If the user asks to generate an icon, logo, diagram, or UI graphic as an image, use `image_generate`.
+
+Prefer editing or writing the native source when:
+
+- Extending or matching an existing SVG/vector icon set, logo system, or illustration library in the repo.
+- The asset is a simple shape, diagram, wireframe, or icon and deterministic, editable code-native output matters.
+- The source already exists in an editable native format and only needs a small project-local change.
+- The user clearly wants deterministic code-native output rather than a generated bitmap.
 
 ## Two questions before every call
 

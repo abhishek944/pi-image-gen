@@ -1,6 +1,6 @@
 {
   "name": "@abhishek944/pi-image-gen",
-  "version": "0.4.1",
+  "version": "0.4.2",
   "description": "Image and optional sprite-sheet generation for Pi via ChatGPT Codex subscriptions, OpenAI, Gemini, Qwen, Seedream, Meta Muse Image, OpenRouter, and custom providers.",
   "keywords": [
     "pi-package",

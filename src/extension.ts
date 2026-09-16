@@ -118,7 +118,7 @@ export default function piImageGenExtension(pi: ExtensionAPI): void {
       description:
         'Generate or edit images. The image provider route and model are fixed by pi-image-gen.defaultProvider/defaultModel in settings (this tool does not accept provider or model parameters). Pass `image` to do image-to-image / edit / style transfer / character preservation: a regular image file inside the session cwd (absolute or relative) or a public http(s) URL. To iterate on a previous result, pass its file path back when it is inside cwd. Do NOT pass base64 or data: URIs — write bytes to a file under cwd first. Saves the output to disk and returns the absolute path(s). When reporting the result to the user, render each generated image as inline markdown — copy the `![alt](…)` line(s) from the tool result verbatim so the UI can display it; do not just paste the bare path. Run /image-gen list to see the active model.',
       promptSnippet:
-        'Generate or edit raster images (photos, illustrations, textures, mockups). Not for icons/logos/diagrams that should be repo-native SVG/CSS/canvas.',
+        'Generate or edit raster images, including icons, logos, and diagrams when requested. Prefer repo-native SVG/CSS/canvas when editability or exact integration with existing assets matters.',
       promptGuidelines: buildImageGuidelines(caps),
       parameters: buildImageToolParameters(caps) as never,
       async execute(_toolCallId: string, rawParams: unknown, signal, onUpdate, ctx) {
@@ -891,7 +891,7 @@ export function buildImageGuidelines(caps: ImageToolCapabilities): string[] {
   const showN =
     caps.api !== 'meta' && caps.api !== 'ark' && (!caps.model || caps.model.nMax > 1);
   const guidelines = [
-    'Use image_generate for bitmap assets: photos, illustrations, textures, sprites, product/UI mockups, concept art. Do NOT use it for icons, logos, or diagrams that should match existing repo-native SVG/vector/CSS/canvas assets — edit or write those directly instead.',
+    'Use image_generate for bitmap assets: photos, illustrations, textures, sprites, product/UI mockups, concept art, icons, logos, and diagrams. For icons, logos, diagrams, or UI graphics, prefer repo-native SVG/vector/CSS/canvas when matching an existing asset system, deterministic output, or ongoing editability matters; this is a recommendation, not a prohibition on image generation.',
     'Generate vs edit: with no `image`, or when `image` entries are only style/composition/mood references, this is a fresh generation. To modify an existing image while preserving most of it, pass that image and describe the change as an edit.',
     ...(showN
       ? [
