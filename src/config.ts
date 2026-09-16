@@ -1,3 +1,5 @@
+import { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
 import { loadPiSettings } from '@amaster.ai/pi-shared/settings';
 import { sanitizeCapabilities } from './capabilities.js';
 import { canUseMetaOAuth } from './providers/meta.js';
@@ -70,13 +72,37 @@ function inheritCapabilities(
 }
 
 export function loadImageGenSettings(cwd: string, projectTrusted = false): ImageGenSettings {
+  let fallback: ImageGenSettings;
   try {
-    return loadPiSettings<ImageGenSettings>(SETTINGS_KEY, {
+    fallback = loadPiSettings<ImageGenSettings>(SETTINGS_KEY, { cwd, projectTrusted });
+  } catch {
+    fallback = {};
+  }
+  if (!projectTrusted) return fallback;
+  try {
+    const loaded = loadPiSettings<ImageGenSettings>(SETTINGS_KEY, {
       cwd,
       projectTrusted,
+      strictProjectSettings: true,
     });
+    return malformedProjectNamespace(cwd)
+      ? { ...loaded, spriteGeneration: { ...loaded.spriteGeneration, enabled: false } }
+      : loaded;
   } catch {
-    return {};
+    // Preserve established image settings fallback, but never let a malformed
+    // trusted project file expose a globally enabled optional sprite tool.
+    return { ...fallback, spriteGeneration: { ...fallback.spriteGeneration, enabled: false } };
+  }
+}
+
+function malformedProjectNamespace(cwd: string): boolean {
+  try {
+    const parsed: unknown = JSON.parse(readFileSync(resolve(cwd, '.pi', 'settings.json'), 'utf8'));
+    if (!isRecord(parsed) || !(SETTINGS_KEY in parsed)) return false;
+    return !isRecord(parsed[SETTINGS_KEY]);
+  } catch {
+    // Invalid/unreadable files are handled by strictProjectSettings above.
+    return false;
   }
 }
 

@@ -25,6 +25,11 @@ import { MAX_GENERATED_IMAGES, MAX_REFERENCE_IMAGE_INPUTS } from './image-input.
 import { discoverOpenRouterCapabilities } from './openrouter-discovery.js';
 import { canUseMetaOAuth } from './providers/meta.js';
 import { SettingsWriteError, updateProjectImageGenSettings } from './settings-write.js';
+import { formatSpriteToolResult, spriteProgressMessage } from './sprite/format.js';
+import { runSpritePipeline } from './sprite/pipeline.js';
+import { buildSpriteGuidelines, buildSpriteToolParameters } from './sprite/schema.js';
+import { normalizeSpriteSettings } from './sprite/settings.js';
+import type { SpriteGenerateParams } from './sprite/types.js';
 import type {
   ApiStyle,
   GenerateImageParams,
@@ -38,6 +43,11 @@ export { loadImageGenSettings, resolveModel } from './config.js';
 export { errorMessageForUser, toLogSummary } from './errors.js';
 export { generateImage } from './generate.js';
 export type { GenerateImageParams, ImageGenSettings } from './types.js';
+export { runSpritePipeline } from './sprite/pipeline.js';
+export { normalizeSpriteSettings } from './sprite/settings.js';
+export type { SpriteGenerateParams, SpriteGenerateResult, SpriteGenerationSettings, SpriteValidationIssue } from './sprite/types.js';
+
+const SPRITE_TOOL = 'sprite_generate';
 
 /**
  * Quality levels advertised for providers whose `quality` vocabulary we have
@@ -141,6 +151,50 @@ export default function piImageGenExtension(pi: ExtensionAPI): void {
     });
   };
 
+  const registerSpriteTool = (): void => {
+    const caps = resolveImageToolCapabilities(settings, discoveredCapabilities);
+    pi.registerTool({
+      name: SPRITE_TOOL,
+      label: 'SpriteGen',
+      description:
+        'Generate one coherent transparent sprite sheet, then locally split, align, validate, and encode it. Disabled unless pi-image-gen.spriteGeneration.enabled is true. Uses the same configured provider/model, safe reference-image rules, and generation boundary as image_generate. One call makes exactly one image-generation request and never retries automatically.',
+      promptSnippet: 'Generate one coherent action as a deterministic sprite-sheet bundle and optional APNG.',
+      promptGuidelines: buildSpriteGuidelines(),
+      parameters: buildSpriteToolParameters(caps) as never,
+      async execute(_toolCallId: string, rawParams: unknown, signal, onUpdate, ctx) {
+        const params = rawParams as SpriteGenerateParams;
+        const cwd = ctx?.cwd ?? sessionCwd;
+        try {
+          const result = await runSpritePipeline(params, {
+            cwd,
+            settings,
+            ...(caps.model ? { modelCapabilities: caps.model } : {}),
+            ...(signal ? { signal } : {}),
+            modelRegistry: ctx.modelRegistry as unknown as ImageModelRegistry,
+            onProgress: (phase) => onUpdate?.({
+              content: [{ type: 'text' as const, text: spriteProgressMessage(phase) }],
+              details: { phase },
+            }),
+          });
+          return {
+            content: [{ type: 'text' as const, text: formatSpriteToolResult(result, markdownImageUrl) }],
+            details: result,
+          };
+        } catch (error) {
+          console.error(`[pi-image-gen] sprite_generate failed: ${toLogSummary(error)}`);
+          throw new Error(`sprite_generate failed: ${errorMessageForUser(error)} No automatic retry was made; ask the user before starting another image-generation request.`);
+        }
+      },
+    });
+  };
+
+  const syncSpriteToolActivation = (): void => {
+    const enabled = normalizeSpriteSettings(settings.spriteGeneration).enabled;
+    const active = pi.getActiveTools().filter((name) => name !== SPRITE_TOOL);
+    if (enabled) active.push(SPRITE_TOOL);
+    pi.setActiveTools([...new Set(active)]);
+  };
+
   const publishSettings = async (nextSettings: ImageGenSettings): Promise<boolean> => {
     const revision = ++discoveryRevision;
     let nextDiscovered: Partial<ImageModelCapabilities> | undefined;
@@ -160,6 +214,8 @@ export default function piImageGenExtension(pi: ExtensionAPI): void {
     settings = nextSettings;
     discoveredCapabilities = nextDiscovered;
     registerImageTool();
+    registerSpriteTool();
+    syncSpriteToolActivation();
     return true;
   };
 
@@ -186,7 +242,8 @@ export default function piImageGenExtension(pi: ExtensionAPI): void {
       }
       if (tokens[0] === 'reload') {
         await publishSettings(loadImageGenSettings(ctx.cwd, isProjectTrusted(ctx)));
-        ctx.ui.notify('pi-image-gen settings reloaded.', 'info');
+        const sprite = normalizeSpriteSettings(settings.spriteGeneration);
+        ctx.ui.notify(`pi-image-gen settings reloaded. Sprite generation is ${sprite.enabled ? 'enabled' : 'disabled'}.`, 'info');
         return;
       }
       if (tokens[0] === 'generate') {
@@ -372,8 +429,11 @@ export default function piImageGenExtension(pi: ExtensionAPI): void {
       const resolvedDefault = defaultModel ? resolveModel(defaultModel, settings) : undefined;
       const defaultProvider = describeDefaultProvider(settings, resolvedDefault, loginStatus.meta);
       const defaultProblem = resolvedDefault && 'error' in resolvedDefault ? resolvedDefault.error : undefined;
+      const sprite = normalizeSpriteSettings(settings.spriteGeneration);
       const lines = [
         `Output directory: ${typeof settings.outputDir === 'string' && settings.outputDir.trim() ? settings.outputDir : '.pi/images'}`,
+        `Sprite generation: ${sprite.enabled ? `enabled (${sprite.defaultRows}x${sprite.defaultColumns}, ${sprite.defaultFormat.toUpperCase()}, ${sprite.frameDurationMs} ms, ${sprite.strictValidation ? 'strict QC' : 'advisory QC'})` : 'disabled'}`,
+        ...(sprite.enabled ? [`Sprite output directory: ${sprite.outputDir}`] : []),
         `Default provider: ${defaultProvider}`,
         `Default model: ${defaultModel ?? '(not set)'}`,
         ...(defaultProblem ? [`  ! ${defaultProblem}`] : []),

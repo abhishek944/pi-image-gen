@@ -1,6 +1,6 @@
 # pi-image-gen
 
-Pi extension that adds an `image_generate` tool. Supported providers:
+Pi extension that adds the general-purpose `image_generate` tool and an optional, disabled-by-default `sprite_generate` pipeline. Supported providers:
 
 | Provider                       | Model id (alias)                              | Authentication        |
 | ------------------------------ | --------------------------------------------- | --------------------- |
@@ -91,6 +91,16 @@ That's it. From the agent: `image_generate({ prompt: "a cyberpunk cat" })`.
     "outputDir": ".pi/images",
     "requestTimeoutMs": 120000,
     "openRouterDiscovery": true,
+    "spriteGeneration": {
+      "enabled": false,
+      "defaultRows": 2,
+      "defaultColumns": 3,
+      "defaultFormat": "apng",
+      "frameDurationMs": 120,
+      "strictValidation": true,
+      "outputDir": ".pi/images/sprites",
+      "maxFrames": 16
+    },
 
     "providers": {
       "openai":     { "baseUrl": "https://my-proxy.example.com/v1", "apiKey": "${MY_OPENAI_KEY}" },
@@ -126,6 +136,7 @@ That's it. From the agent: `image_generate({ prompt: "a cyberpunk cat" })`.
 | `openRouterDiscovery` | Best-effort discovery of the selected OpenRouter model's supported parameters. Default `true`; failure falls back safely. |
 | `providers`       | Per-built-in-provider override. Set `apiKey`, `baseUrl`, or `headers` to point at a proxy or non-standard env var. |
 | `customProviders` | User-defined providers — see below. Built-in route ids such as `openai-api` and `meta-subscription` are reserved and cannot be shadowed. |
+| `spriteGeneration` | Optional sprite-sheet processing settings. Disabled by default; see below. Invalid values fail closed to safe defaults. |
 
 In global and agent settings, `apiKey`, `baseUrl`, and `headers` values support `$VAR` and `${VAR}` environment interpolation. Fallbacks require the braced form (for example, `${FOO:-default}`); `$FOO:-default` is not supported. Project settings keep all of these placeholders literal.
 
@@ -378,6 +389,66 @@ If a custom provider has no `models` list, you can still address it with `<provi
 }
 ```
 
+## Optional sprite generation
+
+`image_generate` remains the general image tool. Enable the separate `sprite_generate` tool only when you need one coherent action sheet plus deterministic local processing:
+
+```json
+{
+  "pi-image-gen": {
+    "defaultProvider": "openai-api",
+    "defaultModel": "gpt-image-2",
+    "spriteGeneration": {
+      "enabled": true,
+      "defaultRows": 2,
+      "defaultColumns": 3,
+      "defaultFormat": "apng",
+      "frameDurationMs": 120,
+      "strictValidation": true,
+      "outputDir": ".pi/images/sprites",
+      "maxFrames": 16
+    }
+  }
+}
+```
+
+Run `/image-gen reload` after editing settings. The command reports whether sprite generation is enabled. Toggling it changes only `sprite_generate`; all other active tools are preserved.
+
+A call makes exactly one provider request through the same `generateImage()` service used by `image_generate`. The model creates one full sheet, then local code splits cells in row-major order, segments alpha foreground, applies one shared scale, aligns frames, checks geometry and silhouette motion, and writes transparent PNG assets. No automatic paid retry occurs.
+
+```ts
+sprite_generate({
+  prompt: "the same red-jacket courier running in place, crisp pixel art",
+  image: ["references/courier.png"],
+  assetType: "player",
+  action: "run",
+  view: "side",
+  rows: 2,
+  columns: 3,
+  frameCount: 6,
+  align: "feet",
+  format: "apng",
+  frameDurationMs: 120,
+  filename: "courier-run"
+})
+```
+
+Six frames default to a 2×3 grid. `frameCount` must equal `rows × columns`, with a hard maximum of 16. Supported output formats are `apng` and `frames`; GIF is intentionally not advertised because it reduces alpha and color fidelity. Model-aware `size`, `aspectRatio`, `imageSize`, and `quality` controls appear only when the configured route supports them.
+
+Each call reserves a new run directory and never overwrites an earlier run:
+
+```text
+.pi/images/sprites/courier-run/
+├── prompt-used.txt
+├── raw-sheet.png
+├── sheet-transparent.png
+├── frames/frame-01.png ... frame-06.png
+├── animation.apng
+└── pipeline-meta.json
+```
+
+Strict validation prevents APNG approval when required checks fail, while preserving the raw sheet and any safe processed artifacts. Advisory mode can accept bounded quality warnings, but structural failures such as empty cells or missing alpha still reject the sequence. Local checks cannot prove identity, costume, anatomy, or acting quality; inspect those visually before shipping.
+
 ## Tool: `image_generate`
 
 ```ts
@@ -427,7 +498,7 @@ Returns the absolute file path(s) of saved images. Files land in `outputDir` (de
 
 Advanced controls are also capability-gated:
 
-- OpenAI API GPT Image routes expose `outputFormat`, `background`, `outputCompression`, and `mask`. The private Codex subscription route does not inherit these public-API controls without separate verification. A mask requires an `image` edit target; transparent output requires PNG or WebP.
+- OpenAI API GPT Image routes expose `outputFormat`, `background`, `outputCompression`, and `mask`. The private Codex subscription route exposes `background` and forwards `auto`, `transparent`, or `opaque`; it returns PNG images and does not expose the other public-API controls. A mask requires an `image` edit target; transparent output requires PNG or WebP.
 - Qwen Image 3 routes expose `negativePrompt`, `seed`, `promptEnhance`, `enableThinking`, and `watermark`.
 - Seedream exposes `watermark` and `seriesMaxImages`. A series is a related set, not independent `n` variants.
 - OpenRouter capability discovery caches the selected model's endpoint metadata for ten minutes and may add format, background, compression, seed, or negative-prompt controls. Discovery has a five-second deadline and safely falls back to the static/generic schema.
@@ -492,7 +563,7 @@ There is intentionally no `model` parameter on the tool — the active route/mod
 - `/image-gen doctor` — validate the provider/model pair, authentication presence, timeout, custom-provider shapes, and output-directory writability without making a paid generation request or printing credentials.
 - `/image-gen setup` — interactively choose a configured route and compatible model. Non-interactive hosts receive equivalent `/image-gen use` guidance.
 - Command arguments provide completions for subcommands, routes, and known model ids.
-- `/image-gen list` — show output directory, default provider, default model, routes currently configured through API keys/Pi logins/custom settings, and every available provider/model route. OpenAI API vs Codex subscription and Meta API vs Meta subscription are separate entries. Listing login status never refreshes or retrieves an OAuth token.
+- `/image-gen list` — show output directory, sprite status/defaults, default provider, default model, routes currently configured through API keys/Pi logins/custom settings, and every available provider/model route. OpenAI API vs Codex subscription and Meta API vs Meta subscription are separate entries. Listing login status never refreshes or retrieves an OAuth token.
 - `/image-gen set provider <provider>` — persist only the default provider route. If the existing model is incompatible, the command warns so you can set the model next.
 - `/image-gen set model <model>` — persist the model after validating it against the selected provider.
 - `/image-gen use <provider> <model>` — validate and persist both atomically. This is the recommended switch command.
@@ -507,6 +578,12 @@ The three settings commands update `<cwd>/.pi/settings.json` only for a trusted 
 
 This package ships an `image-gen` skill (`skills/image-gen/SKILL.md`) that Pi loads on demand. It carries the prompting playbook the one-line tool guidance can't hold: when to use raster generation vs repo-native SVG/CSS, generate-vs-edit intent, `n`-is-variants-not-assets, multi-image role labeling, edit invariants, text-in-image handling, and the labeled prompt schema. The tool works without it; the skill makes the model use the tool well.
 
+The optional `sprite-gen` skill (`skills/sprite-gen/SKILL.md`) explains one-action sheet prompting, reference roles, grid/alpha constraints, validation limits, disabled-state guidance, and explicit retry behavior. The skill may remain discoverable while the tool is disabled; runtime activation is controlled by `spriteGeneration.enabled`.
+
 ## Acknowledgements
 
-This standalone repository is derived from [`packages/pi-image-gen`](https://github.com/TGYD-helige/pi/tree/master/packages/pi-image-gen) in the TGYD-helige Pi extensions monorepo. Codex authentication and transport behavior was informed by [`pi-codex-image-gen`](https://github.com/crazygit/pi-codex-image-gen). See [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
+This standalone repository is derived from [`packages/pi-image-gen`](https://github.com/TGYD-helige/pi/tree/master/packages/pi-image-gen) in the TGYD-helige Pi extensions monorepo. Codex authentication and transport behavior was informed by [`pi-codex-image-gen`](https://github.com/crazygit/pi-codex-image-gen).
+
+The optional sprite-generation workflow was inspired by and adapted from concepts in [`agent-sprite-forge`](https://github.com/0x0funky/agent-sprite-forge). Thank you to 0x0funky and its contributors for sharing their work.
+
+See [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).

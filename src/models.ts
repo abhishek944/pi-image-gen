@@ -81,6 +81,7 @@ export const BUILT_IN_MODELS: BuiltInModelEntry[] = [
     capabilities: {
       sizes: ['auto', '1024x1024', '1536x1024', '1024x1536'],
       qualityValues: ['low', 'medium', 'high', 'auto'],
+      backgroundValues: ['auto', 'transparent', 'opaque'],
       nMax: 1,
       maxReferenceImages: 5,
       inputFormats: ['PNG', 'WEBP', 'JPEG'],

@@ -1,12 +1,14 @@
 {
   "name": "@abhishek944/pi-image-gen",
-  "version": "0.3.0",
-  "description": "Image generation for Pi via ChatGPT Codex subscriptions, OpenAI, Gemini, Qwen, Seedream, Meta Muse Image, OpenRouter, and custom providers.",
+  "version": "0.4.0",
+  "description": "Image and optional sprite-sheet generation for Pi via ChatGPT Codex subscriptions, OpenAI, Gemini, Qwen, Seedream, Meta Muse Image, OpenRouter, and custom providers.",
   "keywords": [
     "pi-package",
     "pi",
     "extension",
     "image-generation",
+    "sprite-generation",
+    "apng",
     "codex",
     "chatgpt",
     "nano-banana",
@@ -57,7 +59,8 @@
     "check": "npm run typecheck && npm pack --dry-run --json >/dev/null"
   },
   "dependencies": {
-    "@amaster.ai/pi-shared": "^0.1.10"
+    "@amaster.ai/pi-shared": "^0.1.10",
+    "upng-js": "^2.1.0"
   },
   "peerDependencies": {
     "@earendil-works/pi-ai": ">=0.80.10",

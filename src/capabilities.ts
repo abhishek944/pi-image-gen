@@ -40,10 +40,12 @@ export function capabilitiesForApi(
     delete clean.aspectRatios;
     delete clean.imageSizes;
   }
-  if (api !== 'openai' && api !== 'openrouter') {
+  if (api !== 'openai' && api !== 'openrouter' && api !== 'codex') {
     delete clean.qualityValues;
-    delete clean.outputFormats;
     delete clean.backgroundValues;
+  }
+  if (api !== 'openai' && api !== 'openrouter') {
+    delete clean.outputFormats;
     delete clean.supportsOutputCompression;
   }
   if (

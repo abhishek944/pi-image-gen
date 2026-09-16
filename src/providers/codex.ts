@@ -24,7 +24,7 @@ export const codexAdapter: ImageProviderAdapter = {
       model: remoteModelId,
       ...(editing ? { images: toDataUrls(inputs ?? []) } : {}),
       prompt: params.prompt,
-      background: 'auto',
+      background: params.background ?? 'auto',
       quality: params.quality ?? 'auto',
       size: params.size ?? 'auto',
     };

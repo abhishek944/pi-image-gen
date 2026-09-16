@@ -1,3 +1,5 @@
+import type { SpriteGenerationSettings } from './sprite/types.js';
+
 export type ApiStyle =
   | 'openai'
   | 'gemini'
@@ -97,6 +99,8 @@ export type ImageGenSettings = {
   providers?: Partial<Record<BuiltInProviderId, BuiltInProviderOverride>>;
   /** User-defined custom providers keyed by provider name. */
   customProviders?: Record<string, CustomImageProvider>;
+  /** Optional sprite-sheet generation and deterministic local processing. Disabled by default. */
+  spriteGeneration?: SpriteGenerationSettings;
 };
 
 export type GenerateImageParams = {
