@@ -41,7 +41,7 @@ pi install npm:@abhishek944/pi-image-gen
 Or directly from GitHub:
 
 ```sh
-pi install git:github.com/abhishek944/pi-image-gen@v0.4.1
+pi install git:github.com/abhishek944/pi-image-gen@v0.4.2
 ```
 
 The package's `pi.extensions` field auto-registers the compiled `dist/extension.js` entry with the host pi-coding-agent runtime; no extra wiring needed.
@@ -296,7 +296,7 @@ Each custom provider declares:
 | Field      | Required | Notes                                                                                |
 | ---------- | -------- | ------------------------------------------------------------------------------------ |
 | `api` | yes      | One of `openai`, `gemini`, `dashscope`, `openrouter`, `ark`, `meta`. Picks the image-API wire shape. |
-| `baseUrl`  | yes      | API endpoint URL. `$VAR` syntax supported.                                           |
+| `baseUrl`  | no       | API endpoint URL; defaults to the selected `api` adapter's built-in endpoint when omitted. Environment interpolation follows the settings-file rules above. |
 | `apiKey`   | usually  | Credential string. `$VAR` syntax supported. Required for `bearer` and `header` authentication. |
 | `auth`     | no       | `{ "type": "bearer" }`, `{ "type": "header", "header": "x-api-key" }`, or explicit `{ "type": "none" }`. Omission preserves the adapter's legacy default (Gemini uses `x-goog-api-key`; the others use bearer). |
 | `name`     | no       | Display name shown in `/image-gen list`.                                             |
@@ -444,13 +444,26 @@ sprite_generate({
   columns: 3,
   frameCount: 6,
   align: "feet",
+  scaleStrategy: "fit",
+  componentMode: "largest",
   format: "apng",
   frameDurationMs: 120,
   filename: "courier-run"
 })
 ```
 
-Six frames default to a 2×3 grid. `frameCount` must equal `rows × columns`, with a hard maximum of 16. Supported output formats are `apng` and `frames`; GIF is intentionally not advertised because it reduces alpha and color fidelity. Model-aware `size`, `aspectRatio`, `imageSize`, and `quality` controls appear only when the configured route supports them.
+Six frames default to a 2×3 grid. `frameCount` must equal `rows × columns`, subject to the configured `maxFrames` and a hard maximum of 16. Supported output formats are `apng` and `frames`; GIF is intentionally not advertised because it reduces alpha and color fidelity. APNG requires at least two frames; use `format: "frames"` for a single sprite. Model-aware `size`, `aspectRatio`, `imageSize`, and `quality` controls appear only when the configured route supports them.
+
+Processing controls:
+
+- `align`: `feet`, `bottom`, or `center`. Defaults to `feet` for characters and props, or `center` for `fx`, `spell`, `projectile`, and `impact` assets.
+- `scaleStrategy`: `fit` (default) applies one shared scale to fit all frames; `preserve` keeps the source scale unless a shared reduction is needed to prevent clipping.
+- `componentMode`: `largest` favors the main connected subject; `all` preserves meaningful detached components. Defaults to `all` for the effect asset types above and `largest` otherwise.
+- `frameDurationMs`: an integer from 20 to 10000; defaults to the configured value (120 ms).
+- `strictValidation`: overrides the configured validation mode for this call.
+- `outputDir`: overrides the sprite output root. Relative paths must stay inside the session cwd and must not contain symlinks; absolute roots are also supported.
+
+The generated sheet must be a readable PNG with usable alpha, and its width and height must divide evenly by the grid's columns and rows. Explicit pixel sizes are checked for grid divisibility before generation. The pipeline requests PNG and a transparent background when the active model advertises those controls; routes without them must still return a suitable sheet. Sprite generation enforces the active model's reference-image count, unlike the advisory model counts on `image_generate`.
 
 Each call reserves a new run directory and never overwrites an earlier run:
 
@@ -472,10 +485,10 @@ Strict validation prevents APNG approval when required checks fail, while preser
 image_generate({
   prompt: string,                  // required — what to draw or how to edit
   image?: string[],                // optional — array of file paths or http(s) URLs
-  n?: number,                      // per-model ceiling (qwen 1–6, gpt-image-2 1–10); hidden for Seedream
+  n?: number,                      // per-model ceiling; hidden for Codex, Seedream, and Meta
   size?: string,                   // per-model form (see below); hidden for Gemini models
   aspectRatio?: string,            // Gemini models only — enum from the model's vocabulary
-  imageSize?: string,              // Gemini models only — tier enum ("1K"/"2K"/"4K"), when the model has tiers
+  imageSize?: string,              // Gemini tier enum; 3.1 Flash also exposes "512px"
   quality?: 'low'|'medium'|'high'|'xhigh'|'max'|'auto', // exact enum is model-specific
   outputFormat?: 'png'|'jpeg'|'webp', // verified OpenAI/OpenRouter routes
   background?: 'auto'|'transparent'|'opaque',
@@ -499,13 +512,14 @@ Returns the absolute file path(s) of saved images. Files land in `outputDir` (de
 - `size` follows the model's documented form:
   - **Qwen** (`qwen-image-*`): `"<width>*<height>"` (asterisk, e.g. `"2048*2048"`), total pixels 512²–2048²; 3.0 models additionally cap aspect ratio at 1:8–8:1. The x-form is normalized automatically as a safety net.
   - **Seedream** (`doubao-seedream-*`): a tier token from the model's list (`1K`/`1.5K`/`2K`/`3K`/`4K`) **or** an explicit `"<w>x<h>"` within the model's pixel window (2K floor on 5.0/4.5).
-  - **gpt-image-2**: `"auto"` or `"<w>x<h>"` — arbitrary sizes allowed (both edges divisible by 16, ratio ≤ 3:1, 655,360–8,294,400 px, longest edge ≤ 3840), beyond the standard `1024x1024`/`1536x1024`/`1024x1536`.
+  - **Codex subscription (`gpt-image-2`)**: the tool exposes `"auto"`, `"1024x1024"`, `"1536x1024"`, and `"1024x1536"`, not the public OpenAI API's arbitrary-size range.
+  - **OpenAI API `gpt-image-2`**: `"auto"` or `"<w>x<h>"` — arbitrary sizes allowed (both edges divisible by 16, ratio ≤ 3:1, 655,360–8,294,400 px, longest edge ≤ 3840), beyond the standard `1024x1024`/`1536x1024`/`1024x1536`.
   - **GPT Image 2.5 Flare/Sunburst**: the same arbitrary `"<w>x<h>"` range as GPT Image 2 (multiples of 16, ratio 1:3–3:1, 655,360–8,294,400 px, longest edge ≤ 3840), plus `"auto"`. The standard recommended sizes remain `1024x1024`, `1536x1024`, and `1024x1536`; resolutions above `2560x1440` are experimental.
   - **Meta Muse Image**: passed through the Responses API's `image_generation` tool; official cookbook examples include `1024x1024`, `1536x1024`, and `1024x1536`, but the field remains free-form for provider validation.
   - Omit `size` to use the model's own default (qwen-image-3.0 auto-picks from the prompt).
-- `aspectRatio` / `imageSize` replace `size` for **Gemini** models (they have no pixel-size knob): `aspectRatio` is an enum from the model's vocabulary (10–14 values), `imageSize` an enum of the model's tiers (`1K`/`2K`/`4K`; hidden when the model is fixed at one tier, as `gemini-3.1-flash-lite-image` and `gemini-2.5-flash-image` are).
-- `n` is model-specific and carries the model's documented ceiling in its description (Qwen 6, GPT Image 2/2.5 10). The extension enforces a universal maximum of 10 outputs per call. It is **hidden for Seedream and Meta Muse Image** — those APIs expose no count knob here, and direct callers are rejected if they request more than one output.
-- `image` spells out the active model's documented reference-image contract in its description (formats, max count, per-image byte ceiling, dimension advice): qwen documents ≤ 3 images (JPG/JPEG/PNG/BMP/TIFF/WEBP/GIF, ≤ 10MB each), Seedream ≤ 10–14 (incl. HEIC/HEIF, ≤ 30MB), gpt-image-2 ≤ 16 (png/webp/jpg, ≤ 50MB), Gemini ≤ 3–14 (≤ 20MB), Meta Muse Image labels the extension's own recognized formats (PNG/JPEG/GIF/WEBP/BMP/TIFF/HEIC/HEIF) because the cookbook does not publish an exhaustive input contract. Provider-documented contracts remain advisory; the extension-wide 16-reference, 20MB-per-input, and 128MB-combined safety ceilings are enforced locally, and providers may enforce stricter rules.
+- `aspectRatio` / `imageSize` replace `size` for **Gemini** models (they have no pixel-size knob): `aspectRatio` is an enum from the model's vocabulary (10–14 values), `imageSize` an enum of the model's tiers. Gemini 3 Pro exposes `1K`/`2K`/`4K`; Gemini 3.1 Flash also exposes `512px` (the exact upstream literal remains pending live verification). The field is hidden for fixed-resolution models: Gemini 3.1 Flash Lite is fixed at `1K`, and Gemini 2.5 Flash has no tier control.
+- `n` is model-specific and carries the model's documented ceiling in its description (Qwen 6, GPT Image 2/2.5 10). The extension enforces a universal maximum of 10 outputs per call. It is **hidden for Codex, Seedream, and Meta Muse Image** — those routes expose no count knob here, and direct callers are rejected if they request more than one output.
+- `image` spells out the active model's documented reference-image contract in its description (formats, max count, per-image byte ceiling, dimension advice): qwen documents ≤ 3 images (JPG/JPEG/PNG/BMP/TIFF/WEBP/GIF, ≤ 10MB each), Seedream ≤ 10–14 (incl. HEIC/HEIF, ≤ 30MB), OpenAI API gpt-image-2 ≤ 16 (png/webp/jpg, ≤ 50MB), Codex ≤ 5 (PNG/WEBP/JPEG, ≤ 20MB), Gemini ≤ 3–14 (≤ 20MB), Meta Muse Image labels the extension's own recognized formats (PNG/JPEG/GIF/WEBP/BMP/TIFF/HEIC/HEIF) because the cookbook does not publish an exhaustive input contract. Provider-documented contracts remain advisory; the extension-wide 16-reference, 20MB-per-input, and 128MB-combined safety ceilings are enforced locally, and providers may enforce stricter rules.
 - `quality` appears **only** for a **built-in gpt-image** route — the built-in OpenAI provider on `gpt-image-*`, or an OpenRouter route whose model id is gpt-image (e.g. `openrouter/openai/gpt-image-2`). GPT Image 2 and the verified Codex route use `low`/`medium`/`high`/`auto`; GPT Image 2.5 Flare and Sunburst additionally expose `xhigh` and `max`. It is **omitted from the schema entirely** for:
   - Gemini, DashScope/Qwen, Ark/Seedream, and Meta Muse Image — their image APIs have no `quality` field (Seedream varies quality by `size` resolution tier instead);
   - **non-gpt-image routes** on the OpenAI/OpenRouter wire — e.g. built-in `openai/dall-e-3` (which uses `standard`/`hd`) or an OpenRouter route to a non-OpenAI model like Seedream — because the enum above is gpt-image's vocabulary, not the wire format's; and
@@ -517,7 +531,7 @@ Advanced controls are also capability-gated:
 
 - OpenAI API GPT Image routes expose `outputFormat`, `background`, `outputCompression`, and `mask`. The private Codex subscription route exposes `background` and forwards `auto`, `transparent`, or `opaque`; it returns PNG images and does not expose the other public-API controls. A mask requires an `image` edit target; transparent output requires PNG or WebP.
 - Qwen Image 3 routes expose `negativePrompt`, `seed`, `promptEnhance`, `enableThinking`, and `watermark`.
-- Seedream exposes `watermark` and `seriesMaxImages`. A series is a related set, not independent `n` variants.
+- Seedream exposes `watermark`; supported non-Pro models also expose `seriesMaxImages` (1–10). Seedream 5.0 Pro does not support series output. A series is a related set, not independent `n` variants.
 - OpenRouter capability discovery caches the selected model's endpoint metadata for ten minutes and may add format, background, compression, seed, or negative-prompt controls. Discovery has a five-second deadline and safely falls back to the static/generic schema.
 - Custom models may opt into the same fields through their `capabilities` declaration. Unsupported accepted parameters are rejected before a paid request rather than silently dropped.
 
@@ -567,9 +581,11 @@ Provider behavior:
 
 | Provider | Image input route |
 |---|---|
-| OpenAI (`gpt-image-2`) | `POST /v1/images/edits` (multipart). Supports multi-image. |
+| OpenAI (`gpt-image-2`, GPT Image 2.5 Flare/Sunburst and their snapshots) | `POST /v1/images/edits` (multipart). Supports multi-image and optional masks. |
+| ChatGPT Codex subscription (`gpt-image-2`) | `POST /backend-api/codex/images/edits` with JSON `images` entries. The model contract documents up to 5 references. |
 | Gemini (`gemini-3-pro-image`, `gemini-3.1-flash-image`, `gemini-3.1-flash-lite-image`, `gemini-2.5-flash-image`) | `inline_data` parts prepended to the user message. Supports multi-image. |
 | DashScope (`qwen-image-3.0-pro`, `qwen-image-3.0`, `qwen-image-2.0-pro`, `qwen-image-2.0`) | `image` parts in `messages[].content`. Up to 3 images. |
+| Volcengine Ark (Seedream) | `POST /api/v3/images/generations` with an `image` array in the JSON body. Supports multi-image; no separate edits endpoint. |
 | Meta Muse Image (`muse-image-1.0`) | `POST /v1/responses` with `input_image` content parts. Supports multi-image composition. |
 | OpenRouter | `POST /api/v1/images` with `input_references` JSON. Supports multi-image. |
 
