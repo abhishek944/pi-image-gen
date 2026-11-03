@@ -5,6 +5,7 @@
  */
 export {
   ImageGenError,
+  type RetainedPartialFailure,
   toLogSummary,
   errorMessageForUser,
   redactUrl,

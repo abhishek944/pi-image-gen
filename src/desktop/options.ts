@@ -10,4 +10,11 @@ export type GenerateImageOptions = {
   modelRegistry?: ImageModelRegistry;
   modelCapabilities?: ImageModelCapabilities;
   onProgress?: (phase: 'loading-inputs' | 'waiting-provider' | 'saving-output') => void;
+  /**
+   * Trusted serializable internal option: retain confirmed saved outputs and
+   * report their receipts when generation fails, instead of the desktop default
+   * partial-batch cleanup. Set only by the native factory; desktop callers omit
+   * it and keep existing cleanup behavior unchanged.
+   */
+  retainPartialOutputs?: boolean;
 };

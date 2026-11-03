@@ -32,7 +32,13 @@ export async function compareImages(
       });
       entries.push({ route, status: 'success', result });
     } catch (error) {
-      entries.push({ route, status: options.signal?.aborted ? 'cancelled' : 'failed', error: errorMessageForUser(error) });
+      const partial = error instanceof ImageGenError ? error.partial : undefined;
+      entries.push({
+        route,
+        status: options.signal?.aborted ? 'cancelled' : 'failed',
+        error: errorMessageForUser(error),
+        ...(partial && partial.images.length > 0 ? { partialImages: [...partial.images] } : {}),
+      });
     }
   }
   return { entries };

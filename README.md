@@ -303,7 +303,7 @@ const result = await searchImages({ query: 'red panda', limit: 5 }, { settings }
 const comparison = await compareImageSearches({ query: 'red panda', limit: 5 }, { settings });
 ```
 
-Both functions accept an optional `signal` in the options. `loadImageSearchSettings(cwd, projectTrusted)` loads search settings explicitly for library hosts. The generation `/core` and `/durable` entries are unchanged; this Node search entry does not claim a portable or durable search runtime.
+Both functions accept an optional `signal` in the options. `loadImageSearchSettings(cwd, projectTrusted)` loads search settings explicitly for library hosts. The settings-only `/durable` entry additionally registers native `image_search` and `image_search_compare` tools from explicit search settings; this Node search entry itself does not claim a portable runtime.
 
 ## DeepSeek Harness
 
@@ -845,7 +845,7 @@ No automatic fallback occurs after **403/policy refusal, 400/422, 5xx, timeout, 
 
 Use **`image_compare`** only when the user explicitly asks to compare models, or run `/image-gen compare <prompt>`. It uses exactly the entries in `compare`, without fallback/substitution and without changing the default. Each entry is a separate potentially billable generation. One failure does not delete other successful images, and cancellation prevents subsequent entries from starting. Comparison results are labeled by the selected provider/model and retain per-entry duration, usage, cost, original paths and bounded native previews. Missing cost remains unknown; there is no invented combined charge.
 
-The comparison tool accepts `prompt`, optional `image` references, `filename` and `outputDir`. To avoid pretending different providers share size/quality semantics, it uses each model's native defaults rather than exposing default-model-specific controls. Mixed-provider comparisons may therefore return different dimensions. The library exports `compareImages(params, options)` with the same small control set. The portable core and native Durable integration retain their existing single-route, host-admitted execution contracts; they do not acquire hidden fallback or comparison.
+The comparison tool accepts `prompt`, optional `image` references, `filename` and `outputDir`. To avoid pretending different providers share size/quality semantics, it uses each model's native defaults rather than exposing default-model-specific controls. Mixed-provider comparisons may therefore return different dimensions. The library exports `compareImages(params, options)` with the same small control set. The portable core keeps its single-route execution contract. The settings-only native Durable entry exposes the same fallback-backed `image_generate` and the `compare`-list `image_compare` (without per-call `outputDir`), plus `sprite_generate` only when `spriteGeneration.enabled` is true; it adds no hidden routes beyond the supplied settings.
 
 ## Slash commands
 

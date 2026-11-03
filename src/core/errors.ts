@@ -1,4 +1,25 @@
+import type { Cost, ImageTokenUsage, ReportedUsage } from './protocol.js';
+import type { GeneratedImage } from '../types/desktop.js';
 import type { ResolvedProvider } from '../types/provider.js';
+
+/**
+ * Compact receipts for confirmed saved outputs that survived a failed call.
+ * Carried on `ImageGenError.partial` only when the caller opted into retention;
+ * every field mirrors the success surface, so nothing here can leak a provider
+ * body, credential, or signed URL.
+ */
+export type RetainedPartialFailure = {
+  /** Confirmed saved files; never deleted by the retaining caller. */
+  readonly images: readonly GeneratedImage[];
+  readonly dispatched: boolean;
+  readonly uncertain: boolean;
+  readonly storageUncertain: boolean;
+  readonly durationMs: number;
+  readonly requestId?: string;
+  readonly reportedUsage?: ReportedUsage;
+  readonly tokenUsage?: ImageTokenUsage;
+  readonly costDetails: Cost;
+};
 
 /**
  * Trust boundary for the whole extension, portable half. Raw provider bodies —
@@ -15,6 +36,8 @@ export class ImageGenError extends Error {
     message: string,
     logSummary: string,
     readonly fallbackReason?: 'missing-credentials' | 'auth' | 'not-found' | 'rate-limit',
+    /** Retained receipts; present only when the caller opted into retention. */
+    readonly partial?: RetainedPartialFailure,
   ) {
     super(message);
     this.name = 'ImageGenError';

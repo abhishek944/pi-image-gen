@@ -25,6 +25,8 @@ export function desktopSink(params: GenerateImageParams, options: GenerateImageO
   const begin = () => { stem ??= sanitizeFilename(params.filename ?? `${model}-${formatStamp((options.now ?? (() => new Date()))())}`); };
   return {
     begin,
+    /** Confirmed saved files; used for retention reporting when cleanup is skipped. */
+    retained: (): GeneratedImage[] => [...saved],
     async store(output: Original, index: number, context: ImageStoreContext): Promise<GeneratedImage> {
       begin();
       if (!ready) {

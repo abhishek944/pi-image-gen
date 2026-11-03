@@ -59,6 +59,7 @@ export async function runSpritePipeline(params: SpriteGenerateParams, options: S
     const generated = await generateImage(generationParams, {
       cwd: options.cwd,
       settings: options.settings,
+      ...(options.retainPartialOutputs ? { retainPartialOutputs: true as const } : {}),
       ...(options.fetchImpl ? { fetchImpl: options.fetchImpl } : {}),
       ...(options.signal ? { signal: options.signal } : {}),
       ...(options.now ? { now: options.now } : {}),
@@ -151,7 +152,10 @@ export async function runSpritePipeline(params: SpriteGenerateParams, options: S
   } catch (error) {
     if (!complete) {
       const cancelled = error instanceof ImageGenError && /cancelled/i.test(error.logSummary);
-      if (cancelled && !paidOutputSaved) {
+      // Retaining callers keep the run directory (prompt, manifest, and any
+      // retained sheet) so confirmed outputs survive cancellation; the desktop
+      // default still removes a run that never saved paid output.
+      if (cancelled && !paidOutputSaved && !options.retainPartialOutputs) {
         try { await rm(runDirectory, { recursive: true, force: true }); } catch { /* best-effort cancellation cleanup */ }
       } else {
         const category = error instanceof ImageGenError ? error.logSummary : 'unexpected processing error';

@@ -145,7 +145,7 @@ export type ImageGenResult = {
 
 export type ImageCompareEntry =
   | { route: ImageRouteSelection; status: 'success'; result: ImageGenResult }
-  | { route: ImageRouteSelection; status: 'failed' | 'cancelled'; error: string };
+  | { route: ImageRouteSelection; status: 'failed' | 'cancelled'; error: string; partialImages?: GeneratedImage[] };
 
 export type ImageCompareResult = { entries: ImageCompareEntry[] };
 export type CompareImageParams = Pick<GenerateImageParams, 'prompt' | 'image' | 'filename' | 'outputDir'>;
