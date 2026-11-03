@@ -1,3 +1,6 @@
+> **Moved to Astack**
+> This repository is archived and read-only. Development is maintained in the [Astack monorepo](https://github.com/abhishek944/astack); see [packages/pi-image-gen](https://github.com/abhishek944/astack/tree/main/packages/pi-image-gen).
+
 # pi-image-gen
 
 Pi extension with image generation/editing (`image_generate`), optional sprite generation (`sprite_generate`), and **independent existing-image search** (`image_search`). Search has its own configuration and providers; it never generates images. See [Image search](#image-search) below.
